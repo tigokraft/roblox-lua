@@ -48,7 +48,14 @@ Goals the user stated: bring things to HvH (roll / desync control), understand w
 - real/fake delta ≈ 2 × limit (168 at 84°), so desync itself is working as configured.
 
 ## Current state / next steps
-1. **Live feed is written but never deployed or tested.** Needs: the user's VPS saved as an SSH connection in the Claude app (they said they would), a domain pointing at it, then deploy `server/` (receiver in `/opt/hvh-ingest`, token in `/etc/hvh-ingest.env` chmod 600, Caddy block, systemd unit), check `https://<domain>/health`, then in-game: paste URL + token into the "Live server feed" textboxes and press "Send test event". Unknown whether the cheat's HttpService proxy allows arbitrary domains. Read data over SSH: `sqlite3 /var/lib/hvh-ingest/events.db "select ts,kind,data from events order by id desc limit 20"`. The user also floated Appwrite; they chose the simple SQLite receiver.
+1. **Live feed deployed 2026-11-20 (session 2), not yet tested from the game.**
+   - Public: `https://feed.sites.exxo.world/ingest` (POST, `X-Token`) and `/health`. Everything else 404. Checked with curl: health 200, no token 401, valid token 204, row landed in SQLite.
+   - Topology: Roblox → Caddy on VPS (`exxo-vps`, TLS) → WireGuard → **pve2 LXC 115 `hvh-ingest`** (Debian 13, LAN 192.168.68.34, WG 10.8.0.8). Receiver binds 10.8.0.8:8787 only. No router ports opened; the CT dials out to the VPS (keepalive 25).
+   - In CT: `/opt/hvh-ingest/receiver.py`, unit `hvh-ingest.service` (after `wg-quick@wg0`), `/etc/hvh-ingest.env` (INGEST_TOKEN + INGEST_HOST, 600). WG key `/etc/wireguard/wg0.key`.
+   - The token is copied to `server/ingest.env` on the user's Mac (gitignored). Never print it or commit it.
+   - Read data: `ssh pve2-claude 'pct exec 115 -- sqlite3 /var/lib/hvh-ingest/events.db "select datetime(ts,\"unixepoch\"),kind,data from events order by id desc limit 20"'`
+   - Redeploy the receiver: `scp server/receiver.py pve2-claude:/root/ && ssh pve2-claude 'pct push 115 /root/receiver.py /opt/hvh-ingest/receiver.py && pct exec 115 -- systemctl restart hvh-ingest'`
+   - Next: in game, paste the URL and token into the "Live server feed" textboxes and press "Send test event". **Unknown whether the cheat's HttpService proxy allows arbitrary domains.** If it fails, the `[FEED] post failed: ...` line says why.
 2. Ask the user to check double tap and fake lag are enabled in the cheat's menu; the HUD shows `choke` and `DT n/14 on|off [source]`.
 3. Idea the user liked but not built: an **A/B tester** that cycles inverter/pitch settings per round (`round_start` event exists) and counts deaths per setting. Also a resolver built on the enemy intel / `plist` overrides (see the user's other scripts' approach: hybrid brute-force + adaptive, learns from `aim_miss`).
 4. Verify the new code actually loads: expect `[desync_aa] v3 loaded` in the Lua console. Earlier pastes showed the user running stale copies several times — always check that line first.

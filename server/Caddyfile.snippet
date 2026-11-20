@@ -1,18 +1,17 @@
-# Add this block to your existing Caddyfile (replace the hostname with your real one),
-# then: sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
-# The DNS A/AAAA record for the hostname must already point at the VPS.
+# Deployed in /etc/caddy/Caddyfile on the VPS (exxo-vps). The receiver runs on pve2 LXC 115
+# and is reached over WireGuard at 10.8.0.8. DNS: *.sites.exxo.world -> VPS (Cloudflare, DNS only).
+# After editing: sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
 
-logs.example.com {
-	encode zstd gzip
-	request_body {
-		max_size 256KB
-	}
-	# only the two endpoints the receiver implements are reachable
-	@ok path /ingest /health
-	handle @ok {
-		reverse_proxy 127.0.0.1:8787
-	}
-	handle {
-		respond 404
-	}
+feed.sites.exxo.world {
+    request_body {
+        max_size 256KB
+    }
+    # only the two endpoints the receiver implements are reachable
+    @ok path /ingest /health
+    handle @ok {
+        reverse_proxy 10.8.0.8:8787
+    }
+    handle {
+        respond 404
+    }
 }

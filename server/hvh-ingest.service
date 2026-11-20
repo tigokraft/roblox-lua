@@ -1,12 +1,17 @@
 [Unit]
 Description=desync_aa ingest receiver
-After=network.target
+# On pve2 LXC 115 the receiver listens on the WireGuard address (10.8.0.8), so start after the tunnel.
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target wg-quick@wg0.service
 
 [Service]
-# /etc/hvh-ingest.env contains one line:  INGEST_TOKEN=<long random string>   (chmod 600)
+# /etc/hvh-ingest.env (chmod 600):
+#   INGEST_TOKEN=<long random string>
+#   INGEST_HOST=10.8.0.8      # optional, default 127.0.0.1
 EnvironmentFile=/etc/hvh-ingest.env
 ExecStart=/usr/bin/python3 /opt/hvh-ingest/receiver.py
-Restart=on-failure
+Restart=always
+RestartSec=5
 DynamicUser=yes
 StateDirectory=hvh-ingest
 Environment=INGEST_DB=/var/lib/hvh-ingest/events.db
