@@ -1,0 +1,19 @@
+[Unit]
+Description=desync_aa ingest receiver
+After=network.target
+
+[Service]
+# /etc/hvh-ingest.env contains one line:  INGEST_TOKEN=<long random string>   (chmod 600)
+EnvironmentFile=/etc/hvh-ingest.env
+ExecStart=/usr/bin/python3 /opt/hvh-ingest/receiver.py
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=hvh-ingest
+Environment=INGEST_DB=/var/lib/hvh-ingest/events.db
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
