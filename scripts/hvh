@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run hvhctl on the feed box from this Mac:  scripts/hvh report | scripts/hvh follow | scripts/hvh config set pitch=Up
+set -euo pipefail
+args=$(printf '%q ' "$@")
+exec ssh -o ServerAliveInterval=30 pve2-claude "pct exec 115 -- /usr/local/bin/hvhctl $args"

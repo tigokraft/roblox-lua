@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en" data-radius="sharp">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>unsyk admin</title>
+<meta name="description" content="Admin console for unsyk: configs, official presets, licenses and live play data.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='3' width='10' height='10' rx='1.5' transform='rotate(45 8 8)' fill='%231f2de6'/%3E%3Crect x='6.5' y='6.5' width='3' height='3' transform='rotate(45 8 8)' fill='%23eef0f3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Gabarito:wght@400..700&family=Figtree:wght@400..600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin/app.css">
+<script src="/admin/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- sign in -->
+<div class="signin" id="signin" hidden>
+  <form class="signin-card" id="signin-form" autocomplete="on" novalidate>
+    <div class="mark mark--lg" aria-hidden="true"><i></i></div>
+    <h1>Sign in to unsyk admin</h1>
+    <p class="muted">Password and the 6-digit code from your authenticator app.</p>
+    <label class="field"><span>User</span><input name="user" id="si-user" autocomplete="username" required></label>
+    <label class="field"><span>Password</span><input name="password" id="si-pass" type="password" autocomplete="current-password" required></label>
+    <label class="field"><span>Authenticator code</span><input name="code" id="si-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required></label>
+    <p class="form-error" id="si-err" role="alert"></p>
+    <button class="btn btn--primary btn--block" type="submit" id="si-go">Sign in</button>
+    <p class="fine muted">5 wrong tries lock this address for 15 minutes. Codes work once.</p>
+  </form>
+</div>
+
+<!-- app -->
+<div class="app" id="app" hidden>
+  <aside class="side" id="side">
+    <div class="side-top">
+      <a class="brand" href="#overrides"><span class="mark" aria-hidden="true"><i></i></span><span>unsyk</span><em>admin</em></a>
+      <button class="icon-btn side-close" id="side-close" aria-label="Close menu">&times;</button>
+    </div>
+    <nav class="side-nav" aria-label="Sections">
+      <p class="side-h">Configs</p>
+      <a href="#overrides" data-page="overrides"><span class="ico ico-sliders"></span>Live overrides</a>
+      <a href="#presets" data-page="presets"><span class="ico ico-star"></span>Official presets</a>
+      <a href="#library" data-page="library"><span class="ico ico-stack"></span>Player configs</a>
+      <p class="side-h">People</p>
+      <a href="#licenses" data-page="licenses"><span class="ico ico-key"></span>Licenses</a>
+      <p class="side-h">Play data</p>
+      <a href="#live" data-page="live"><span class="ico ico-pulse"></span>Live</a>
+      <a href="#stats" data-page="stats"><span class="ico ico-bars"></span>Stats and export</a>
+      <p class="side-h">System</p>
+      <a href="#script" data-page="script"><span class="ico ico-code"></span>Script and downloads</a>
+    </nav>
+    <div class="side-foot">
+      <div class="who"><span class="dot" id="feed-dot"></span><span id="who">admin</span></div>
+      <div class="side-actions">
+        <button class="link-btn" id="theme" type="button">Theme</button>
+        <button class="link-btn" id="signout" type="button">Sign out</button>
+      </div>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <main class="main" id="main" tabindex="-1">
+    <header class="top">
+      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open menu" aria-expanded="false"><span></span></button>
+      <div class="top-title"><h1 id="page-title">Live overrides</h1><p id="page-sub" class="muted"></p></div>
+      <div class="top-tools" id="top-tools"></div>
+    </header>
+    <div class="page" id="page"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog class="dlg" id="dlg"></dialog>
+</body>
+</html>

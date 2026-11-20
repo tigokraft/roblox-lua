@@ -1,0 +1,8 @@
+{
+  "rules": [
+    "remove_comments",
+    "remove_empty_do",
+    "remove_nil_declaration",
+    "rename_variables"
+  ]
+}

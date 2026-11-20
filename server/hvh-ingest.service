@@ -1,5 +1,5 @@
 [Unit]
-Description=desync_aa ingest receiver
+Description=unsyk ingest receiver
 # On pve2 LXC 115 the receiver listens on the WireGuard address (10.8.0.8), so start after the tunnel.
 After=network-online.target wg-quick@wg0.service
 Wants=network-online.target wg-quick@wg0.service
@@ -8,6 +8,9 @@ Wants=network-online.target wg-quick@wg0.service
 # /etc/hvh-ingest.env (chmod 600):
 #   INGEST_TOKEN=<long random string>
 #   INGEST_HOST=10.8.0.8      # optional, default 127.0.0.1
+#   PUBLIC_BASE=https://feed.sites.exxo.world   # optional; invite text + loader line in the panel
+#   LAN_HOST=192.168.68.34  LAN_PORT=8080  LAN_ALLOW=192.168.68.0/22   # admin panel, home LAN only
+# The admin panel login lives in /var/lib/hvh-ingest/admin.json (hvhctl admin setup).
 EnvironmentFile=/etc/hvh-ingest.env
 ExecStart=/usr/bin/python3 /opt/hvh-ingest/receiver.py
 Restart=always

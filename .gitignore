@@ -3,3 +3,6 @@ __pycache__/
 *.db
 *.env
 .env*
+build/
+exports/
+.taste-skill/
