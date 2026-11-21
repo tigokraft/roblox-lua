@@ -6,7 +6,9 @@ Sign-in needs the password AND a current 6-digit TOTP code (RFC 6238, SHA1, 30 s
 accepted once only (last_step), so a sniffed code cannot be replayed.
 
 Sessions are random 256-bit tokens kept in memory (sha256 only), sent as a __Host- cookie (Secure, HttpOnly,
-SameSite=Strict, Path=/). 30 min idle, 12 h absolute; a restart logs the admin out.
+SameSite=Strict, Path=/). 30 min idle, 12 h absolute. Sessions survive a service restart (every deploy restarts it):
+their sha256 hashes are kept in admin_sessions.json next to admin.json (0600), tied to a fingerprint of the current
+password + TOTP secret, so `hvhctl admin setup` (new credentials) still ends every session.
 State-changing requests must also carry X-Panel: 1 and a same-origin Origin (checked by the receiver).
 
 Brute force: 5 failures per IP per 15 min -> that IP is refused; 30 failures in total per 15 min -> all
@@ -36,6 +38,50 @@ _fails = {}        # ip -> [ts]
 _all_fails = []    # [ts]
 _DUMMY = None
 _mem = {"last_step": 0}
+_store = {"path": None, "admin": None, "fp": None, "saved": 0.0}
+TOUCH_SAVE = 60  # write "last" at most once a minute; idle expiry is off by at most that much after a restart
+
+
+def _fp(cfg):
+    return hashlib.sha256(f"{cfg.get('pw')}|{cfg.get('totp')}".encode()).hexdigest()[:24] if cfg else None
+
+
+def use_store(admin_json):
+    """Keep sessions in a file next to admin.json and load the ones still valid. Called once by the receiver."""
+    _store["admin"] = admin_json
+    _store["path"] = os.path.join(os.path.dirname(admin_json), "admin_sessions.json")
+    fp = _fp(load(admin_json))
+    _store["fp"] = fp
+    try:
+        with open(_store["path"], "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    if not fp or not isinstance(d, dict) or d.get("fp") != fp or not isinstance(d.get("s"), dict):
+        return 0
+    now = time.time()
+    with _lock:
+        for h, s in d["s"].items():
+            try:
+                if now - float(s["last"]) <= IDLE and now - float(s["created"]) <= ABSOLUTE:
+                    _sessions[h] = {"created": float(s["created"]), "last": float(s["last"]),
+                                    "ip": str(s.get("ip", "")), "user": str(s.get("user", ""))}
+            except (KeyError, TypeError, ValueError):
+                continue
+        return len(_sessions)
+
+
+def _persist(now=None):
+    """Write the session table (hashes only). Caller holds _lock."""
+    if not _store["path"]:
+        return
+    if _store["fp"] is None:
+        _store["fp"] = _fp(load(_store["admin"]))
+    try:
+        save(_store["path"], {"fp": _store["fp"], "s": _sessions})
+        _store["saved"] = now or time.time()
+    except OSError:
+        pass  # sessions still work from memory
 
 
 def admin_path(db_path):
@@ -164,6 +210,7 @@ def sign_in(path, user, pw, code, ip, now=None):
         ok = step is not None
         if ok:
             _mem["last_step"] = cfg["last_step"] = step
+            _store["fp"] = _fp(cfg)
             try:
                 save(path, cfg)
             except OSError:
@@ -175,6 +222,9 @@ def sign_in(path, user, pw, code, ip, now=None):
     with _lock:
         _sessions[hashlib.sha256(tok.encode()).hexdigest()] = {"created": now, "last": now, "ip": ip, "user": cfg["user"]}
         _fails.pop(ip, None)
+        for h in [h for h, x in _sessions.items() if now - x["last"] > IDLE or now - x["created"] > ABSOLUTE]:
+            del _sessions[h]
+        _persist(now)
     return True, tok
 
 
@@ -190,8 +240,11 @@ def check(tok, now=None):
             return None
         if now - s["last"] > IDLE or now - s["created"] > ABSOLUTE:
             del _sessions[h]
+            _persist(now)
             return None
         s["last"] = now
+        if now - _store["saved"] >= TOUCH_SAVE:
+            _persist(now)
         return dict(s)
 
 
@@ -199,6 +252,7 @@ def sign_out(tok):
     if tok:
         with _lock:
             _sessions.pop(hashlib.sha256(tok.encode()).hexdigest(), None)
+            _persist()
 
 
 def cookie_header(tok, max_age=ABSOLUTE, secure=True):

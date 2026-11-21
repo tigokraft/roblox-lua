@@ -9,7 +9,8 @@ feed.sites.exxo.world {
     # only the endpoints the receiver implements are reachable
     # /loader.lua is public (no secrets in it): the one-line load.lua fetches it with game:HttpGet
     # /beat = the script's license heartbeat. The admin panel is NOT here on purpose: it is home-LAN only (:8080).
-    @ok path /ingest /health /config /version /beat /script.lua /auth /loader.lua /me /cloud
+    # /resolver = candidate resolver table (session only; the script falls back to /me?resolver=1 while missing).
+    @ok path /ingest /health /config /version /beat /resolver /script.lua /auth /loader.lua /me /cloud
     handle @ok {
         reverse_proxy 10.8.0.8:8787
     }

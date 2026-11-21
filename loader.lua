@@ -1,14 +1,9 @@
--- unsyk loader: load THIS in the cheat. It logs in with your license key, downloads the newest
--- unsyk.lua from the feed server and runs it. To update, just reload this loader.
--- First time: open the cheat menu tab "unsyk login", paste your key (DAA-XXXXX-...) into Key and press
--- "Log in" (a full key pasted into the box also logs in by itself). There is no login window.
--- The key is saved in the cheat's database and locks to the first Roblox account that uses it.
--- A key works on ONE device at a time: logging in elsewhere ends this session and the script stops itself.
--- After login a small card shows download -> compile -> start and retries the download. The last copy that
--- compiled is used only while the server cannot be reached at all, the session is still valid and the
--- subscription has not ended; a refused key (expired, revoked, other account) also deletes that copy.
+-- unsyk loader: load THIS in the cheat. No key needed: you get the stable build, logged under your Roblox
+-- name (guest:<name>). With a license key (cheat menu tab "unsyk login": paste the key, press Log in, reload)
+-- you get the beta build instead. The key locks to the first Roblox account that uses it and works on one
+-- device at a time. To update, reload this loader.
 local DEFAULT_BASE = "https://feed.sites.exxo.world"
-local LOADER_VERSION = 8
+local LOADER_VERSION = 9
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
@@ -157,7 +152,7 @@ end
 
 -- ---------- license login ----------
 local lp = Players.LocalPlayer
-local auth = { session = nil, expires = 0, name = nil, days = nil, sub_end = 0 }
+local auth = { session = nil, expires = 0, name = nil, days = nil, sub_end = 0, guest = false }
 
 local function parse_cached()
     local c = database.read("aa_sess")
@@ -186,9 +181,23 @@ local function login(key)
     end
     auth.session, auth.expires, auth.name, auth.days = out.session, tonumber(out.expires) or now() + 3600, out.name, out.days_left
     auth.sub_end = tonumber(out.sub_end) or 0
+    auth.guest = false
     dbw("aa_key", key)
     dbw("aa_sess", auth.session .. "|" .. auth.expires .. "|" .. tostring(auth.name or "") .. "|" .. tostring(auth.days or "")
         .. "|" .. tostring(auth.sub_end))
+    return true
+end
+
+-- keyless access: the stable build, logged under the Roblox name (guest:<name>). Beta needs a key.
+local function guest_login()
+    local body = HttpService:JSONEncode({ guest = true, uid = lp and lp.UserId or 0, user = lp and lp.Name or "" })
+    local code, res = request("POST", base .. "/auth", { ["Content-Type"] = "application/json" }, body)
+    if code == nil then return false, "cannot reach the server: " .. res end
+    local okj, out = pcall(function() return HttpService:JSONDecode(res) end)
+    out = okj and type(out) == "table" and out or {}
+    if code ~= 200 or type(out.session) ~= "string" then return false, tostring(out.error or ("server said " .. code)) end
+    auth.session, auth.expires, auth.name, auth.days = out.session, tonumber(out.expires) or now() + 3600, out.name, nil
+    auth.sub_end, auth.guest = 0, true
     return true
 end
 
@@ -199,14 +208,15 @@ UNSYK_AUTH = {
         if auth.session and auth.expires - now() < 1800 and not refreshing then
             refreshing = true
             local k = database.read("aa_key")
-            if type(k) == "string" then pcall(login, k) end
+            if auth.guest then pcall(guest_login)
+            elseif type(k) == "string" then pcall(login, k) end
             refreshing = false
         end
         return auth.session and { ["X-Session"] = auth.session } or nil
     end,
     info = function() return { name = auth.name, expires = auth.expires, days = auth.days, sub_end = auth.sub_end } end,
     logout = function()
-        auth.session, auth.expires = nil, 0
+        auth.session, auth.expires, auth.guest = nil, 0, false
         dbw("aa_key", ""); dbw("aa_sess", ""); dbw("aa_cache", "")
         log(255, 200, 120, "logged out: the saved key was removed. Reload the loader to log in again.")
     end,
@@ -234,8 +244,8 @@ local function build_tab()
         local tab = menu.new_tab("unsyk login", "rbxassetid://10734975692")
         UNSYK_AUTH.tab = tab
         lsec = tab:new_section("License", "Left")
-        if not auth.session then
-            key_box = lsec:new_textbox("Key", "DAA-XXXXX-XXXXX-XXXXX-XXXXX", "")
+        if not auth.session or auth.guest then
+            key_box = lsec:new_textbox("Key (optional)", "DAA-XXXXX-XXXXX-XXXXX-XXXXX", "")
             lsec:new_button("Log in", function() want_key = key_box:get(); want_login = true end)
         end
         lsec:new_button("Log out", function() UNSYK_AUTH.logout(); tab_say("logged out, reload the loader") end)
@@ -267,38 +277,49 @@ build_tab()
 if auth.session then tab_say(who_text()) end
 
 if not auth.session then
-    tab_say(first_err and ("saved key failed: " .. first_err) or "paste your key and press Log in")
-    log(255, 200, 120, "not logged in: open the cheat menu tab \"unsyk login\", paste your key, press Log in")
-    -- the tab's button sets want_login; a full key pasted into the box submits by itself (once per new value)
-    local tried, started = nil, os.clock()
-    while not auth.session do
-        if not want_login and key_box then
-            local okg, v = pcall(function() return key_box:get() end)
-            local k = okg and type(v) == "string" and string.upper(string.gsub(v, "%s", "")) or ""
-            if k ~= tried and string.find(k, "^DAA%-") and #k >= 29 then want_key, want_login = k, true end
-        end
-        if want_login then
+    -- no (working) key: public stable build as a guest, logged under the Roblox name
+    status("login", "guest login…")
+    local ok, why = guest_login()
+    if not ok then
+        log(255, 90, 90, "guest login failed: " .. why)
+        tab_say(why)
+        finish(false, why, C.bad, "copy the [loader] lines from the Lua console")
+        return
+    end
+    tab_say("guest (stable build). Key + Log in, then reload, for the beta")
+    log(255, 200, 120, "no key: running the stable build as " .. tostring(auth.name) .. ". Key holders: paste it in the tab and reload.")
+end
+-- a key typed into the tab while running as a guest: log in now, the beta build comes with the next reload
+task.spawn(function()
+    local tried
+    while true do
+        task.wait(0.3)
+        if want_login or (auth.guest and key_box) then
+            local k = want_login and want_key or nil
+            if not k and key_box then
+                local okg, v = pcall(function() return key_box:get() end)
+                v = okg and type(v) == "string" and string.upper(string.gsub(v, "%s", "")) or ""
+                if v ~= tried and string.find(v, "^DAA%-") and #v >= 29 then k = v end
+            end
             want_login = false
-            tried = string.upper(string.gsub(tostring(want_key or ""), "%s", ""))
-            tab_say("checking key…")
-            log(150, 200, 255, "checking key…")
-            local ok, why = login(want_key or "")
-            if not ok then
-                log(255, 90, 90, "login failed: " .. why)
+            if k and auth.guest then
+                tried = string.upper(string.gsub(tostring(k), "%s", ""))
+                tab_say("checking key…")
+                local ok, why = login(k)
+                if ok then
+                    tab_say(who_text() .. ". Reload the loader to switch builds.")
+                    return
+                end
                 tab_say(why)
+                log(255, 90, 90, "login failed: " .. why)
             end
         end
-        if os.clock() - started > 600 then
-            log(255, 90, 90, "no key entered for 10 minutes, reload the loader to try again")
-            tab_say("timed out, reload the loader")
-            return
-        end
-        task.wait(0.1)
+        if not auth.guest then return end
     end
-end
+end)
 show_card()
 local who = tostring(auth.name or "?")
-tab_say(who_text())
+if not auth.guest then tab_say(who_text()) end
 
 -- ---------- download ----------
 local src, why, unreachable = nil, nil, false
@@ -311,10 +332,12 @@ for attempt = 1, 3 do
     end
     if code == 401 then
         -- session revoked or expired on the server: one fresh login with the saved key, then retry
+        local was_guest = auth.guest
         auth.session = nil
         local k = database.read("aa_key")
         local ok, lwhy = false, "no saved key"
-        if type(k) == "string" and #k > 0 then ok, lwhy = login(k) end
+        if was_guest then ok, lwhy = guest_login()
+        elseif type(k) == "string" and #k > 0 then ok, lwhy = login(k) end
         why = ok and "session renewed" or ("not authorized: " .. tostring(lwhy))
         if not ok then dbw("aa_sess", "") break end
     elseif code == 403 or code == 429 then
@@ -369,7 +392,8 @@ if not ok then
     return
 end
 local ver = tostring(UNSYK_VERSION or "?")
-local days = auth.days and (" · " .. auth.days .. "d left") or ""
+if UNSYK_BUILD then ver = (UNSYK_CHANNEL == "beta" and "beta " or "") .. "#" .. tostring(UNSYK_BUILD) .. " " .. ver end
+local days = auth.days and (" · " .. auth.days .. "d left") or (auth.guest and " · guest" or "")
 if used == "cache" then
     finish(true, "running cached " .. ver, C.warn, "download failed: " .. tostring(why or cerr))
 else

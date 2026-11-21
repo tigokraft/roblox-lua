@@ -1,15 +1,18 @@
 [Unit]
 Description=unsyk ingest receiver
 # On pve2 LXC 115 the receiver listens on the WireGuard address (10.8.0.8), so start after the tunnel.
-After=network-online.target wg-quick@wg0.service
+After=network-online.target wg-quick@wg0.service tailscaled.service
 Wants=network-online.target wg-quick@wg0.service
 
 [Service]
 # /etc/hvh-ingest.env (chmod 600):
 #   INGEST_TOKEN=<long random string>
+#   SESSION_SECRET=<another long random string>   # signs license sessions; unset = derived from INGEST_TOKEN
+#   TRUSTED_PROXY=10.8.0.1    # the only address whose X-Forwarded-For is believed (Caddy over WireGuard)
 #   INGEST_HOST=10.8.0.8      # optional, default 127.0.0.1
 #   PUBLIC_BASE=https://feed.sites.exxo.world   # optional; invite text + loader line in the panel
 #   LAN_HOST=192.168.68.34  LAN_PORT=8080  LAN_ALLOW=192.168.68.0/22   # admin panel, home LAN only
+#   TS_HOST=100.x.y.z  TS_NAMES=hvh-admin,hvh-admin.taila87232.ts.net   # same panel on the tailnet (TS_ALLOW=100.64.0.0/10)
 # The admin panel login lives in /var/lib/hvh-ingest/admin.json (hvhctl admin setup).
 EnvironmentFile=/etc/hvh-ingest.env
 ExecStart=/usr/bin/python3 /opt/hvh-ingest/receiver.py
@@ -22,6 +25,26 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# The receiver needs no privileges at all: plain TCP sockets and its own state dir.
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+# a flood or a bug must not take the whole container down
+MemoryMax=512M
+TasksMax=200
 
 [Install]
 WantedBy=multi-user.target

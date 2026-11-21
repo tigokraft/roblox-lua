@@ -4,8 +4,10 @@
 One listener (INGEST_HOST:INGEST_PORT), reached only through Caddy on the VPS:
   POST /ingest  (X-Token or X-Session)  body: {"session": "...", "events": [{"kind": "...", ...}, ...]}
   GET  /config  -> remote-control settings the script applies
-  GET  /script.lua -> current unsyk.lua, stamped with version + the downloader's license, uid, sub end, download id
-  GET  /version -> short version hash (old scripts)     GET /beat -> {"v", "sub_end", "acct"} (kill-switch heartbeat)
+  GET  /script.lua -> the account's build (stable, or beta for beta members, see hvh_release.py), stamped with
+                    version / build / channel + the downloader's license, uid, sub end, download id
+  GET  /resolver?b=BUILD -> candidate resolver table for that build (hvh_resolver.py; also /me?resolver=1&b=)
+  GET  /version -> short version hash (old scripts)     GET /beat -> {"v", "build", "ch", "sub_end", "acct"} (heartbeat)
   POST /auth    {"key", "uid", "user"} -> {"session", "expires", "name", "days_left", "sub_end"} (see hvh_auth.py)
   GET  /me      -> {"acct", "name", "days_left", "expires"}
   GET  /cloud   -> {"configs": [...], "official": [...]}   GET /cloud?name=N   ?code=C (shared)   ?preset=N (official)
@@ -14,18 +16,19 @@ One listener (INGEST_HOST:INGEST_PORT), reached only through Caddy on the VPS:
   Every X-Token endpoint also accepts a license session in X-Session instead of the master token.
   A session is valid only while the key is active and no newer login replaced it (one device at a time).
 
-Admin panel: HOME LAN ONLY, on a second listener (LAN_HOST:LAN_PORT, e.g. http://192.168.68.34:8080/admin).
-It is never proxied: the client IP must be in LAN_ALLOW and the Host header must be the LAN address (no DNS
-rebinding). The public listener answers 404 for /admin*.
+Admin panel: HOME LAN + TAILNET ONLY, never the internet. Listeners: LAN_HOST:LAN_PORT (http://192.168.68.34:8080/admin)
+and, if TS_HOST is set, TS_HOST:TS_PORT on the CT's own Tailscale node (http://hvh-admin:8080/admin).
+Neither is proxied: the client IP must be in that listener's allow list (LAN_ALLOW / TS_ALLOW) and the Host header
+one of its own names (no DNS rebinding). The public listener answers 404 for /admin*.
   GET  /admin, /admin/app.js, /admin/app.css   static files from ADMIN_DIR (no secrets in them)
   /admin/api/*  needs the admin cookie (password + TOTP sign-in, hvh_admin.py); POSTs also need X-Panel: 1
                 and Origin == the LAN origin.
 There is deliberately NO way to read events or the script without either a license session or the admin login.
 """
 import hashlib
-import hmac
 import argparse
 import contextlib
+import hmac
 import io
 import ipaddress
 import json
@@ -48,18 +51,37 @@ PORT = int(os.environ.get("INGEST_PORT", "8787"))
 SCRIPT_PATH = os.environ.get("SCRIPT_PATH", "/opt/hvh-ingest/unsyk.lua")
 LOADER_PATH = os.environ.get("LOADER_PATH", os.path.join(os.path.dirname(SCRIPT_PATH), "loader.lua"))
 ADMIN_DIR = os.environ.get("ADMIN_DIR", os.path.join(os.path.dirname(SCRIPT_PATH), "admin"))
+# the script's built-in config presets (scripts/extract_builtin.py, shipped by deploy.sh) for the Official presets page
+BUILTIN_PATH = os.environ.get("BUILTIN_PATH", os.path.join(os.path.dirname(SCRIPT_PATH), "builtin_presets.json"))
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://feed.sites.exxo.world")
 LAN_HOST = os.environ.get("LAN_HOST", "")
 LAN_PORT = int(os.environ.get("LAN_PORT", "8080"))
 LAN_ALLOW = [ipaddress.ip_network(n.strip()) for n in os.environ.get("LAN_ALLOW", "192.168.68.0/22").split(",") if n.strip()]
 LAN_ORIGIN = f"http://{LAN_HOST}:{LAN_PORT}"
+# Tailnet copy of the admin listener (CT 115 is its own Tailscale node "hvh-admin"). TS_HOST = its 100.x address,
+# TS_NAMES = the Host names browsers may use (MagicDNS short + full name). TS_ALLOW = which tailnet peers may connect.
+TS_HOST = os.environ.get("TS_HOST", "")
+TS_PORT = int(os.environ.get("TS_PORT", str(LAN_PORT)))
+TS_NAMES = [n.strip() for n in os.environ.get("TS_NAMES", "").split(",") if n.strip()]
+TS_ALLOW = [ipaddress.ip_network(n.strip()) for n in os.environ.get("TS_ALLOW", "100.64.0.0/10").split(",") if n.strip()]
 MAX_BODY = 256 * 1024          # bytes per request
 MAX_EVENTS_PER_REQ = 200
-MAX_REQ_PER_MIN = 120          # global, simple fixed window
+MAX_REQ_PER_MIN = 120          # per account (license name / owner), fixed window
+MAX_REQ_PER_MIN_ALL = 3000     # every account together: the cap that protects the disk
 MAX_DL_PER_HOUR = 30           # script downloads per account
+MIN_FREE_BYTES = 1 << 30       # refuse new events when the state disk has less than 1 GB free
+MAX_THREADS = 64               # concurrent connections per listener; more get dropped at once
+SOCKET_TIMEOUT = 20            # seconds a client may stall mid-request (slow-loris)
+# Only Caddy (the VPS end of the WireGuard tunnel) may tell us the client IP through X-Forwarded-For.
+TRUSTED_PROXY = {p.strip() for p in os.environ.get("TRUSTED_PROXY", "10.8.0.1").split(",") if p.strip()}
 
 if not TOKEN or len(TOKEN) < 24:
     raise SystemExit("INGEST_TOKEN must be set (24+ chars)")
+# Key that signs license sessions and heartbeat tokens. Set SESSION_SECRET so a leaked master token cannot be used
+# to forge sessions for any key. Unset = derived from INGEST_TOKEN (old behaviour). Changing it logs everyone out once.
+SIGN_KEY = os.environ.get("SESSION_SECRET", "") or TOKEN
+if SIGN_KEY is not TOKEN and len(SIGN_KEY) < 32:
+    raise SystemExit("SESSION_SECRET must be 32+ chars")
 
 # hvhctl.py is deployed next to this file: the panel reuses its formatting, report and config writer.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -71,11 +93,19 @@ except Exception as e:  # the ingest side must keep working even if the panel he
 import hvh_admin
 import hvh_auth
 import hvh_cloud
+import hvh_panel
+import hvh_release
+import hvh_resolver
+RELEASES_DIR = hvh_release.releases_dir(DB_PATH)
 KEYS_PATH = hvh_auth.keys_path(DB_PATH)
 ADMIN_PATH = hvh_admin.admin_path(DB_PATH)
+hvh_admin.use_store(ADMIN_PATH)  # admin sign-ins survive restarts/deploys
 CLOUD_DIR = os.environ.get("INGEST_CLOUD", os.path.join(os.path.dirname(DB_PATH), "cloud"))
 AUTH_FAILS = {}                # ip -> [failure timestamps]
 AUTH_MAX_FAILS = 8             # per IP per 10 minutes
+GUEST_ACCESS = os.environ.get("GUEST_ACCESS", "1") != "0"   # keyless stable access; GUEST_ACCESS=0 = keys only
+GUEST_MAX_PER_IP = 30          # guest logins per IP per 10 minutes
+GUEST_LOGINS = {}
 _report_lock = threading.Lock()
 _cfg_lock = threading.RLock()   # admin POSTs hold it around api_config, which takes it again
 
@@ -92,18 +122,73 @@ _db.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind, ts)")
 _db.execute("CREATE TABLE IF NOT EXISTS downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, "
             "acct TEXT, uid INTEGER, ip TEXT, ver TEXT, dl TEXT)")
 _db.execute("CREATE INDEX IF NOT EXISTS idx_dl_acct ON downloads(acct, ts)")
+if "ch" not in [r[1] for r in _db.execute("PRAGMA table_info(downloads)")]:
+    _db.execute("ALTER TABLE downloads ADD COLUMN ch TEXT")      # which channel / build that copy came from
+    _db.execute("ALTER TABLE downloads ADD COLUMN build INTEGER")
 _db.commit()
 _lock = threading.Lock()
-_window = {"start": 0.0, "count": 0}
+_window = {"start": 0.0, "all": 0, "acct": {}}
+_disk = {"ts": 0.0, "ok": True}
 
 
-def rate_ok() -> bool:
+def rate_ok(acct="owner") -> bool:
+    """Per-account fixed window, so one account (or one leaked key) cannot use up everyone's budget."""
     now = time.time()
     with _lock:
         if now - _window["start"] >= 60:
-            _window["start"], _window["count"] = now, 0
-        _window["count"] += 1
-        return _window["count"] <= MAX_REQ_PER_MIN
+            _window["start"], _window["all"], _window["acct"] = now, 0, {}
+        n = _window["acct"].get(acct, 0) + 1
+        _window["acct"][acct] = n
+        _window["all"] += 1
+        return n <= MAX_REQ_PER_MIN and _window["all"] <= MAX_REQ_PER_MIN_ALL
+
+
+def disk_ok() -> bool:
+    """False while the state disk is nearly full (checked at most every 30 s): a flood of events must not fill it."""
+    now = time.time()
+    if now - _disk["ts"] >= 30:
+        try:
+            s = os.statvfs(os.path.dirname(DB_PATH))
+            _disk["ok"] = s.f_bavail * s.f_frsize >= MIN_FREE_BYTES
+        except OSError:
+            _disk["ok"] = True
+        if not _disk["ok"]:
+            print("ingest paused: less than 1 GB free on the state disk", file=sys.stderr)
+        _disk["ts"] = now
+    return _disk["ok"]
+
+
+def read_json(rfile, length):
+    """json.loads that also turns absurdly nested input (RecursionError) into ValueError."""
+    try:
+        return json.loads(rfile.read(length))
+    except RecursionError:
+        raise ValueError("too deeply nested") from None
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on live connection threads."""
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        self._slots = threading.BoundedSemaphore(MAX_THREADS)
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)   # full: drop instead of queueing one more thread
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def read_config() -> bytes:
@@ -116,17 +201,18 @@ def read_config() -> bytes:
         return b'{"v":0,"set":{}}'
 
 
-def script_info():
-    """(stamped source bytes, version, mtime string) or None. Version = first 10 hex of sha256 of the file."""
-    try:
-        with open(SCRIPT_PATH, "rb") as f:
-            src = f.read()
-        mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(SCRIPT_PATH)))
-    except OSError:
+def script_info(acct=None, channel=None):
+    """The build ACCT runs (or CHANNEL's): (stamped source bytes, version, mtime string, build dict) or None.
+    Version = first 10 hex of sha256 of the file; build = {"build", "ch", "note", ...} from hvh_release."""
+    ch = channel or (hvh_release.channel_for(RELEASES_DIR, acct) if acct else "stable")
+    b = hvh_release.build_for(RELEASES_DIR, ch, SCRIPT_PATH)
+    if not b:
         return None
-    ver = hashlib.sha256(src).hexdigest()[:10]
-    stamped = f'UNSYK_VERSION = "{ver}" -- stamped by the feed server, used for update checks\n'.encode() + src
-    return stamped, ver, mtime
+    mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(b["ts"]))
+    stamped = (f'UNSYK_VERSION = "{b["ver"]}" -- stamped by the feed server, used for update checks\n'
+               f'UNSYK_BUILD = {int(b["build"])}\nUNSYK_CHANNEL = "{b["ch"]}"\n'
+               f'UNSYK_RSEED = {hvh_resolver.seed(SIGN_KEY, b["build"])}\n').encode() + b["src"]
+    return stamped, b["ver"], mtime, b
 
 
 # ---------------- panel data (used by the admin API) ----------------
@@ -196,6 +282,22 @@ def api_accounts(con):
     return out
 
 
+def api_live_values(con):
+    """Latest 'settings' event per account: the remote-controllable values the game has right now (vals), and
+    for overridden keys the player's own value underneath (own). Games send one on change and once a minute."""
+    out = {}
+    for r in con.execute(f"SELECT {ACCT} acct, ts, data FROM events WHERE id IN "
+                         f"(SELECT MAX(id) FROM events WHERE kind = 'settings' GROUP BY {ACCT})").fetchall():
+        try:
+            ev = json.loads(r["data"])
+        except ValueError:
+            continue
+        vals, own = ev.get("vals"), ev.get("own")
+        out[r["acct"]] = {"ts": r["ts"], "vals": vals if isinstance(vals, dict) else {},
+                          "own": own if isinstance(own, dict) else {}, "remote": ev.get("remote"), "cv": ev.get("cv")}
+    return out
+
+
 def api_status(q):
     acct = q_acct(q)
     where, args = ("AND " + ACCT + " = ?", (acct,)) if acct else ("", ())
@@ -210,6 +312,7 @@ def api_status(q):
                            "ORDER BY id", (sess,)).fetchall()
         last_any = con.execute(f"SELECT MAX(ts) FROM events WHERE 1 {where}", args).fetchone()[0]
         accounts = api_accounts(con)
+        live_vals = api_live_values(con)
     finally:
         con.close()
 
@@ -291,6 +394,7 @@ def api_status(q):
                   for v, x in sorted(by_cv.items())],
         "recent_deaths": recent,
         "config": cfg_view(acct),
+        "live_vals": live_vals,
         "keys": {k: ({"t": "b"} if s_ == "b" else {"t": "n", "lo": s_[0], "hi": s_[1]} if isinstance(s_, tuple) else {"t": "c", "o": s_})
                  for k, s_ in (hvhctl.KEYS.items() if hvhctl else [])},
         "ctrl_log": [{"ts": c["_ts"], "v": c.get("v"), "applied": c.get("applied"), "rejected": c.get("rejected"),
@@ -420,10 +524,20 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self' https://fonts.go
        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
 
+def builtin_presets():
+    """[{"name", "data"}] the script ships (load-only in game, used when the server has no preset of that name)."""
+    try:
+        with open(BUILTIN_PATH, "r", encoding="utf-8") as f:
+            p = json.load(f).get("presets")
+        return [x for x in p if isinstance(x, dict) and isinstance(x.get("name"), str) and isinstance(x.get("data"), dict)]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return []
+
+
 def known_schema():
-    """{"Section/Item": {"t": "b"|"n"|"s", "o": [seen strings]}} from every saved and official config."""
+    """{"Section/Item": {"t": "b"|"n"|"s", "o": [seen strings]}} from every saved, official and built-in config."""
     seen = {}
-    rows = [c["data"] for c in hvh_cloud.presets(CLOUD_DIR, with_data=True)]
+    rows = [c["data"] for c in hvh_cloud.presets(CLOUD_DIR, with_data=True)] + [b["data"] for b in builtin_presets()]
     for r in hvh_cloud.admin_list(CLOUD_DIR):
         c = hvh_cloud.admin_get(CLOUD_DIR, r["acct"], r["name"])
         if c:
@@ -439,6 +553,10 @@ def known_schema():
 
 def license_rows():
     keys = hvh_auth.list_keys(KEYS_PATH)
+    try:
+        members = set(hvh_release.load(RELEASES_DIR)["beta_members"])
+    except OSError:
+        members = set()
     stats = {}
     if hvhctl:
         con = ro_db()
@@ -460,6 +578,7 @@ def license_rows():
         k["kills"], k["deaths"], k["alive_min"] = a.get("kills", 0), a.get("deaths", 0), a.get("alive_min", 0)
         k["ver"] = s.get("ver")
         k["downloads"], k["last_dl"] = dls.get(k["name"], (0, None))
+        k["beta"] = k["name"] in members
     return keys
 
 
@@ -482,13 +601,14 @@ class AdminAPI:
         length = int(self.headers.get("Content-Length", "0") or 0)
         if length <= 0 or length > limit:
             raise ValueError("bad body size")
-        body = json.loads(self.rfile.read(length))
+        body = read_json(self.rfile, length)
         if not isinstance(body, dict):
             raise ValueError("body must be an object")
         return body
 
     def _same_origin(self):
-        return self.headers.get("X-Panel") == "1" and self.headers.get("Origin") == LAN_ORIGIN
+        origins = getattr(self.server, "origins", (LAN_ORIGIN,))
+        return self.headers.get("X-Panel") == "1" and self.headers.get("Origin") in origins
 
     def _admin(self, method, path, q):
         aj = lambda obj, code=200: self._reply(code, json.dumps(obj, separators=(",", ":"), default=str).encode(),
@@ -533,11 +653,17 @@ class AdminAPI:
             return aj({"error": str(e)}, 400)
         except sqlite3.Error as e:
             return aj({"error": f"db: {e}"}, 503)
+        except hvh_auth.StoreError as e:
+            print(f"admin {path} key store error: {e}", file=sys.stderr)
+            return aj({"error": "key file unreadable, nothing was changed (see the service log)"}, 503)
         except Exception as e:  # a panel bug must answer, not drop the connection
             print(f"admin {path} failed: {e!r}", file=sys.stderr)
             return aj({"error": f"server error: {type(e).__name__}"}, 500)
 
     def _admin_get(self, path, q, aj):
+        if path in ("/admin/api/compare", "/admin/api/health", "/admin/api/sessions", "/admin/api/players",
+                    "/admin/api/player"):
+            return aj(self._panel_get(path, q))
         if path == "/admin/api/status":
             return aj(api_status(q))
         if path == "/admin/api/live":
@@ -548,7 +674,7 @@ class AdminAPI:
             return self._export(q)
         if path == "/admin/api/presets":
             return aj({"presets": hvh_cloud.presets(CLOUD_DIR, with_data=True), "max": hvh_cloud.MAX_PRESETS,
-                       "schema": known_schema()})
+                       "schema": known_schema(), "builtin": builtin_presets()})
         if path == "/admin/api/library":
             return aj({"configs": hvh_cloud.admin_list(CLOUD_DIR)})
         if path == "/admin/api/library/item":
@@ -561,11 +687,13 @@ class AdminAPI:
             con = ro_db()
             try:
                 dl = [dict(r) for r in con.execute(
-                    "SELECT ts, acct, uid, ip, ver, dl FROM downloads ORDER BY id DESC LIMIT 60").fetchall()]
+                    "SELECT ts, acct, uid, ip, ver, dl, ch, build FROM downloads ORDER BY id DESC LIMIT 60").fetchall()]
             finally:
                 con.close()
             return aj({"ver": info[1] if info else None, "mtime": info[2] if info else None,
-                       "size": len(info[0]) if info else 0, "downloads": dl, "base": PUBLIC_BASE})
+                       "size": len(info[0]) if info else 0, "downloads": dl, "base": PUBLIC_BASE,
+                       "releases": hvh_release.summary(RELEASES_DIR),
+                       "accounts": ["owner"] + [k["name"] for k in hvh_auth.list_keys(KEYS_PATH)]})
         if path == "/admin/api/download":
             what = (q.get("f") or [""])[0]
             if what == "loader":
@@ -573,13 +701,44 @@ class AdminAPI:
                     return self._reply(200, f.read(), "text/plain; charset=utf-8", admin=True,
                                        extra={"Content-Disposition": 'attachment; filename="loader.lua"'})
             if what == "script":
-                info = script_info()
+                ch = (q.get("ch") or ["stable"])[0]
+                info = script_info(channel="beta" if ch == "beta" else "stable")
                 if not info:
                     return aj({"error": "script not deployed"}, 503)
                 body = self._stamp(info[0], "owner", None, None, "admin")
+                name = f"unsyk_{info[3]['ch']}_{info[3]['build']}_{info[1]}.lua"
                 return self._reply(200, body, "text/plain; charset=utf-8", admin=True,
-                                   extra={"Content-Disposition": f'attachment; filename="unsyk_{info[1]}.lua"'})
+                                   extra={"Content-Disposition": f'attachment; filename="{name}"'})
         return aj({"error": "not found"}, 404)
+
+    def _panel_get(self, path, q):
+        """Testing (compare / health / sessions) and Players (players / player) views, see hvh_panel.py."""
+        try:
+            rel = hvh_release.summary(RELEASES_DIR)
+        except OSError:
+            rel = {"history": [], "beta_members": []}
+        con = ro_db()
+        try:
+            if path == "/admin/api/compare":
+                return hvh_panel.compare(con, q, rel)
+            if path == "/admin/api/health":
+                return hvh_panel.health(con, q, rel) | {"releases": rel}
+            if path == "/admin/api/sessions":
+                return hvh_panel.sessions(con, q)
+            keys = license_rows()
+            members = set(rel.get("beta_members") or [])
+            if path == "/admin/api/players":
+                return hvh_panel.players(con, q, keys, members)
+            name = (q.get("name") or [""])[0]
+            if not hvh_panel.NAME_RE.match(name):
+                raise ValueError("bad name")
+            key = next((k for k in keys if k["name"] == name), None)
+            cfgs = [c for c in hvh_cloud.admin_list(CLOUD_DIR) if c["acct"] == name]
+            dls = [dict(r) for r in con.execute(
+                "SELECT ts, uid, ip, ver, dl, ch, build FROM downloads WHERE acct = ? ORDER BY id DESC LIMIT 50", (name,))]
+            return hvh_panel.player(con, name, q, key, members, cfgs, dls)
+        finally:
+            con.close()
 
     def _admin_post(self, path, b):
         op = b.get("op") or b.get("action")
@@ -624,8 +783,27 @@ class AdminAPI:
                 return {"ok": True, "name": name, "key": key, "invite": hvh_auth.invite_text(key, days, PUBLIC_BASE)}
             if op in ("revoke", "enable", "reset", "extend", "add_days", "kick", "note", "delete"):
                 hvh_auth.modify(KEYS_PATH, name, op, days, b.get("note"))
+                if op == "delete":
+                    hvh_release.set_member(RELEASES_DIR, name, False)
                 return {"ok": True}
+            if op in ("beta_on", "beta_off"):
+                if name != "owner" and not any(k["name"] == name for k in hvh_auth.list_keys(KEYS_PATH)):
+                    raise ValueError(f"no key named {name}")
+                return {"ok": True, "beta_members": hvh_release.set_member(RELEASES_DIR, name, op == "beta_on")}
             raise ValueError("unknown license action")
+        if path == "/admin/api/releases":
+            if op == "promote":
+                r = hvh_release.promote(RELEASES_DIR)
+            elif op == "end_beta":
+                r = hvh_release.end_beta(RELEASES_DIR)
+            elif op == "point":
+                build = b.get("build")
+                if not isinstance(build, int) or isinstance(build, bool):
+                    raise ValueError("build must be a number")
+                r = hvh_release.point(RELEASES_DIR, str(b.get("channel") or ""), build)
+            else:
+                raise ValueError("op must be promote, end_beta or point")
+            return {"ok": True, "rec": r}
         return None
 
     def _export(self, q):
@@ -648,6 +826,7 @@ class AdminAPI:
 class Handler(AdminAPI, BaseHTTPRequestHandler):
     server_version = "ingest"
     sys_version = ""
+    timeout = SOCKET_TIMEOUT   # socket timeout per connection: a stalled client frees its thread
 
     def log_message(self, fmt, *args):  # keep journal quiet
         pass
@@ -672,24 +851,42 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _authed(self) -> bool:
-        """Master token (owner) or a valid license session. Sets self.lic to the key name for sessions."""
+        """Master token (owner) or a valid license session. Sets self.lic to the key name for sessions.
+        True / False, or None when the key store cannot be read (callers answer 503)."""
         self.lic, self.lic_uid, self.sub_end = None, None, None
         tok = self.headers.get("X-Token", "")
         if tok and hmac.compare_digest(tok.encode(), TOKEN.encode()):
             return True
-        got = hvh_auth.check_session(TOKEN, KEYS_PATH, self.headers.get("X-Session", ""))
+        sess = self.headers.get("X-Session", "")
+        if GUEST_ACCESS and sess.startswith("g1."):
+            got = hvh_auth.check_guest(SIGN_KEY, sess)
+            if got:
+                self.lic, self.lic_uid, self.sub_end = got
+                return True
+            return False
+        try:
+            got = hvh_auth.check_session(SIGN_KEY, KEYS_PATH, sess)
+        except hvh_auth.StoreError as e:
+            # the key file is unreadable: answer 503, not 401, so scripts keep running instead of stopping
+            print(f"auth store error: {e}", file=sys.stderr)
+            return None
         if got:
             self.lic, self.lic_uid, self.sub_end = got
             return True
         return False
 
     def _ip(self):
-        # only Caddy (over WireGuard) reaches this listener; Caddy replaces any client-sent X-Forwarded-For
+        # Caddy (over WireGuard) replaces any client-sent X-Forwarded-For; trust the header only from Caddy itself
+        if self.client_address[0] not in TRUSTED_PROXY:
+            return self.client_address[0]
         return (self.headers.get("X-Forwarded-For", "") or self.client_address[0]).split(",")[0].strip()[:45]
 
     def _auth(self):
         ip, now = self._ip(), time.time()
         with _lock:
+            if len(AUTH_FAILS) > 5000:   # many addresses: drop the ones with nothing recent
+                for k in [k for k, v in AUTH_FAILS.items() if not v or now - v[-1] >= 600]:
+                    del AUTH_FAILS[k]
             fails = [t for t in AUTH_FAILS.get(ip, []) if now - t < 600]
             AUTH_FAILS[ip] = fails
             if len(fails) >= AUTH_MAX_FAILS:
@@ -698,13 +895,29 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 2048:
                 raise ValueError
-            req = json.loads(self.rfile.read(length))
+            req = read_json(self.rfile, length)
             if not isinstance(req, dict):
                 raise ValueError
         except ValueError:
             return self._reply(400, b'{"error":"bad request"}', "application/json")
+        if req.get("guest") and not req.get("key"):
+            # keyless stable access: counted per IP (not as a wrong key) so one address cannot mint endless names
+            if not GUEST_ACCESS:
+                return self._reply(403, b'{"error":"guest access is off, a key is needed"}', "application/json")
+            with _lock:
+                g = [t for t in GUEST_LOGINS.get(ip, []) if now - t < 600]
+                GUEST_LOGINS[ip] = g
+                if len(g) >= GUEST_MAX_PER_IP:
+                    return self._reply(429, b'{"error":"too many guest logins, wait 10 minutes"}', "application/json")
+                g.append(now)
+                if len(GUEST_LOGINS) > 5000:
+                    for k in [k for k, v in GUEST_LOGINS.items() if not v or now - v[-1] >= 600]:
+                        del GUEST_LOGINS[k]
+            code, out = hvh_auth.guest_login(SIGN_KEY, req.get("uid"), req.get("user"))
+            print(f"guest {code} ip={ip} user={str(req.get('user'))[:40]}", file=sys.stderr)
+            return self._reply(code, json.dumps(out).encode(), "application/json")
         try:
-            code, out = hvh_auth.login(TOKEN, KEYS_PATH, req.get("key"), req.get("uid"), req.get("user"), ip)
+            code, out = hvh_auth.login(SIGN_KEY, KEYS_PATH, req.get("key"), req.get("uid"), req.get("user"), ip)
         except OSError:
             code, out = 503, {"error": "server could not save the login, try again"}
         if code != 200:
@@ -727,8 +940,37 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
                 f'UNSYK_SUB_END = {int(sub_end) if sub_end else 0}\nUNSYK_DL = "{dl}"\n')
         return head.encode() + src
 
+    def _rbuild(self, q):
+        """The build the client says it runs (?b=N), if the release store knows it (0 = legacy file), else None."""
+        try:
+            b = int((q.get("b") or [""])[0])
+        except ValueError:
+            return None
+        if b == 0:
+            return 0
+        try:
+            hist = hvh_release.load(RELEASES_DIR)["history"]
+        except OSError:
+            return None
+        return b if any(r.get("build") == b for r in hist) else None
+
+    def _rv(self, q):
+        b = self._rbuild(q)
+        return hvh_resolver.rv(SIGN_KEY, b) if b is not None else None
+
+    def _resolver(self, q):
+        """GET /resolver?b=BUILD: the candidate resolver table for that build (see hvh_resolver.py). Live session or
+        master token only (checked before this is called); per account rate limit like ingest."""
+        if not rate_ok(self._acct()):
+            return self._reply(429)
+        b = self._rbuild(q)
+        if b is None:
+            return self._json(404, {"error": "unknown build"})
+        print(f"resolver acct={self._acct()} build={b} ip={self._ip()}", file=sys.stderr)
+        return self._json(200, hvh_resolver.table(SIGN_KEY, b))
+
     def _serve_script(self):
-        info = script_info()
+        info = script_info(self._acct())
         if not info:
             return self._reply(503)
         acct, now = self._acct(), time.time()
@@ -737,8 +979,8 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
             if self.lic and n >= MAX_DL_PER_HOUR:
                 return self._reply(429, b"too many downloads, wait an hour")
             dl = secrets.token_hex(4)
-            _db.execute("INSERT INTO downloads (ts, acct, uid, ip, ver, dl) VALUES (?,?,?,?,?,?)",
-                        (now, acct, self.lic_uid, self._ip(), info[1], dl))
+            _db.execute("INSERT INTO downloads (ts, acct, uid, ip, ver, dl, ch, build) VALUES (?,?,?,?,?,?,?,?)",
+                        (now, acct, self.lic_uid, self._ip(), info[1], dl, info[3]["ch"], info[3]["build"]))
             _db.commit()
         return self._reply(200, self._stamp(info[0], acct, self.lic_uid, self.sub_end, dl), "text/plain; charset=utf-8")
 
@@ -754,12 +996,20 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
                     return self._reply(200, f.read(), "text/plain; charset=utf-8")
             except OSError:
                 return self._reply(503)
-        if not self._authed():
-            return self._reply(401) if path in ("/me", "/cloud", "/config", "/script.lua", "/version", "/beat") else self._reply(404)
+        ok = self._authed()
+        if ok is None:
+            return self._reply(503)
+        if not ok:
+            return self._reply(401) if path in ("/me", "/cloud", "/config", "/script.lua", "/version", "/beat",
+                                                "/resolver") else self._reply(404)
+        if path == "/resolver" or (path == "/me" and q.get("resolver")):
+            # /me?resolver=1 is the same answer through a route the VPS proxy already forwards
+            return self._resolver(q)
         if path == "/me":
             info = hvh_auth.entry_info(KEYS_PATH, self.lic) if self.lic else None
             out = {"acct": self._acct(), "name": self._acct(), "days_left": None, "expires": None,
-                   "configs": hvh_cloud.count(CLOUD_DIR, self._acct())}
+                   "configs": hvh_cloud.count(CLOUD_DIR, self._acct()),
+                   "channel": hvh_release.channel_for(RELEASES_DIR, self._acct())}
             if info:
                 out.update({"days_left": info["days_left"], "expires": info["expires"]})
             return self._json(200, out)
@@ -778,12 +1028,15 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
                 return self._reply(200, json.dumps(cfg, separators=(",", ":")).encode(), "application/json")
             return self._reply(200, read_config(), "application/json")
         if path == "/version":
-            info = script_info()
+            info = script_info(self._acct())
             return self._reply(200, info[1].encode(), "text/plain") if info else self._reply(503)
         if path == "/beat":
-            info = script_info()
-            return self._json(200, {"v": info[1] if info else None, "sub_end": self.sub_end or 0,
-                                    "acct": self._acct(), "now": int(time.time())})
+            info = script_info(self._acct())
+            return self._json(200, {"v": info[1] if info else None, "build": info[3]["build"] if info else None,
+                                    "ch": info[3]["ch"] if info else None, "sub_end": self.sub_end or 0,
+                                    "acct": self._acct(), "now": int(time.time()),
+                                    "bt": hvh_auth.beat_token(SIGN_KEY, self._acct()),
+                                    "rv": self._rv(q)})
         if path == "/script.lua":
             return self._serve_script()
         self._reply(404)
@@ -793,15 +1046,18 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
         if self.path == "/auth":
             return self._auth()
         if self.path == "/cloud":
-            if not self._authed():
-                return self._reply(401)
-            if not rate_ok():
+            ok = self._authed()
+            if not ok:
+                return self._reply(503 if ok is None else 401)
+            if str(self.lic or "").startswith("guest:"):
+                return self._json(403, {"error": "saving cloud configs needs a key"})
+            if not rate_ok(self._acct()):
                 return self._reply(429)
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > hvh_cloud.MAX_BYTES + 1024:
                     return self._reply(413)
-                req = json.loads(self.rfile.read(length))
+                req = read_json(self.rfile, length)
                 if not isinstance(req, dict):
                     raise ValueError
             except ValueError:
@@ -812,10 +1068,13 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
             return self._json(code, out)
         if self.path != "/ingest":
             return self._reply(404)
-        if not self._authed():
-            return self._reply(401)
-        if not rate_ok():
+        ok = self._authed()
+        if not ok:
+            return self._reply(503 if ok is None else 401)
+        if not rate_ok(self._acct()):
             return self._reply(429)
+        if not disk_ok():
+            return self._reply(507)
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -823,7 +1082,7 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
         if length <= 0 or length > MAX_BODY:
             return self._reply(413)
         try:
-            payload = json.loads(self.rfile.read(length))
+            payload = read_json(self.rfile, length)
             events = payload.get("events", [])
             session = str(payload.get("session", ""))[:64]
             if not isinstance(events, list):
@@ -838,14 +1097,20 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
         uid = self.lic_uid if self.lic_uid else payload.get("uid")
         uid = int(uid) if isinstance(uid, (int, float)) and not isinstance(uid, bool) and 0 < uid < 1e15 else None
         now = time.time()
+        # Did this batch echo a valid rolling heartbeat token? A stubbed/replayed /beat 200 cannot (it never
+        # saw the real token). Only stamped for license sessions; the owner's master token is trusted as-is.
+        beat = str(payload.get("beat", ""))[:16]
+        beat_ok = bool(self.lic) and bool(beat) and any(
+            hmac.compare_digest(beat, hvh_auth.beat_token(SIGN_KEY, self._acct(), now, b)) for b in (0, 1))
         rows = []
         for ev in events[:MAX_EVENTS_PER_REQ]:
             if not isinstance(ev, dict):
                 continue
             ev.pop("lic", None)   # only the server sets these
-            ev.pop("user", None); ev.pop("uid", None)
+            ev.pop("user", None); ev.pop("uid", None); ev.pop("beat_ok", None)
             if self.lic:
                 ev["lic"] = self.lic
+                ev["beat_ok"] = beat_ok
             if user:
                 ev["user"] = user
             if uid:
@@ -858,7 +1123,8 @@ class Handler(AdminAPI, BaseHTTPRequestHandler):
 
 
 class LanHandler(Handler):
-    """Home-LAN listener: only the admin panel. Not proxied, so the socket address is the real client."""
+    """Home-LAN / tailnet listener: only the admin panel. Not proxied, so the socket address is the real client.
+    Each server instance carries its own allow (networks), hosts (accepted Host headers) and origins."""
     server_version = "hvh-lan"
 
     def _ip(self):
@@ -869,9 +1135,9 @@ class LanHandler(Handler):
             client = ipaddress.ip_address(self.client_address[0])
         except ValueError:
             return False
-        if not any(client in net for net in LAN_ALLOW):
+        if not any(client in net for net in self.server.allow):
             return False
-        return self.headers.get("Host", "") in (LAN_HOST, f"{LAN_HOST}:{LAN_PORT}")
+        return self.headers.get("Host", "") in self.server.hosts
 
     def do_GET(self):
         if not self._allowed():
@@ -894,10 +1160,37 @@ class LanHandler(Handler):
         return self._reply(404, b"not found")
 
 
+def admin_listener(bind, port, allow, names, retry=False):
+    """Start one admin listener in a thread. retry=True keeps trying to bind (tailscaled may come up after us)."""
+    hosts = set()
+    for n in names:
+        hosts.update((n, f"{n}:{port}"))
+
+    def bind_once():
+        srv = BoundedServer((bind, port), LanHandler)
+        srv.allow, srv.hosts = allow, hosts
+        srv.origins = tuple(f"http://{h}" for h in sorted(hosts) if ":" in h)
+        print(f"admin panel on http://{bind}:{port}/admin", file=sys.stderr)
+        return srv
+
+    def run(srv):
+        while srv is None:
+            try:
+                srv = bind_once()
+            except OSError as e:
+                print(f"admin listener {bind}:{port} not up yet ({e}), retrying in 10s", file=sys.stderr)
+                time.sleep(10)
+        srv.serve_forever()
+
+    # A LAN bind failure crashes the service (systemd restarts it); the tailnet one waits for tailscaled.
+    threading.Thread(target=run, args=(None if retry else bind_once(),), daemon=True).start()
+
+
 if __name__ == "__main__":
     if LAN_HOST:
-        lan = ThreadingHTTPServer((LAN_HOST, LAN_PORT), LanHandler)
-        threading.Thread(target=lan.serve_forever, daemon=True).start()
+        admin_listener(LAN_HOST, LAN_PORT, LAN_ALLOW, [LAN_HOST])
     else:
-        print("LAN_HOST not set: admin panel disabled", file=sys.stderr)
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+        print("LAN_HOST not set: LAN admin panel disabled", file=sys.stderr)
+    if TS_HOST:
+        admin_listener(TS_HOST, TS_PORT, TS_ALLOW, [TS_HOST] + TS_NAMES, retry=True)
+    BoundedServer((HOST, PORT), Handler).serve_forever()

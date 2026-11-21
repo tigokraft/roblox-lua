@@ -263,11 +263,33 @@ The `aa` library provides complete authority over local camera pitch, yaw, custo
   - Pass `nil` to restore menu control.
 - `aa.get_pitch() -> number?`: Returns active pitch override.
 - `aa.is_pitch_overridden() -> boolean`
+- `aa.override_fake_pitch(val)` / `aa.set_fake_pitch(val)`: Overrides fake pitch. Accepts numbers `[-70..70]` degrees or presets (`"Down"`, `"Up"`, `"Zero"`, `"Disabled"`). Pass `nil` to restore menu control.
+- `aa.get_fake_pitch() -> number?`: Returns active fake pitch override in degrees.
+- `aa.is_fake_pitch_overridden() -> boolean`
+- `aa.override_fake_pitch_angle(deg)` / `aa.set_fake_pitch_angle(deg)`: Overrides the fake pitch angle offset slider `[-20..20]` degrees. Pass `nil` to restore menu slider.
+- `aa.get_fake_pitch_angle() -> number`: Returns the active fake pitch offset angle.
+- `aa.is_fake_pitch_angle_overridden() -> boolean`
+
+### Extended Angles (Body Lean / Roll Offsets)
+- `aa.override_extended_angles(pct)` / `aa.set_extended_angles(pct)`: Overrides extended angles slider percentage `[-100..100%]`. Pass `nil` to restore menu slider.
+- `aa.get_extended_angles() -> number`: Returns current extended angles slider percentage.
+- `aa.is_extended_angles_overridden() -> boolean`: Returns whether extended angles percentage is currently overridden.
+- `aa.is_extended_angles() -> boolean`: Returns `true` if extended angles are currently non-zero.
+- `aa.set_extended_angles_enabled(enabled)`: Configures default state for extended angles in menu configuration.
+- `aa.override_extended_angles_enabled(enabled)`: Overrides whether extended angles are enabled or disabled. Pass `nil` to restore.
+- `aa.get_extended_angles_enabled() -> boolean`: Returns whether extended angles are currently enabled.
 
 ### Yaw & Modifiers
 - `aa.override_yaw(deg, [base])`: Sets base yaw in degrees `[-180..180]`.
   - `base`: `"camera"` (relative to view) or `"world"` (absolute world axis).
-- `aa.override_yaw_offset(deg)`: Sets static angle offset added to base yaw.
+- `aa.override_yaw_offset(deg, [relativeToSlider])`: Sets static angle offset added to base yaw.
+  - If `relativeToSlider` is `true`: adds `deg` on top of the menu slider offset (`slider + deg`).
+  - If `relativeToSlider` is omitted or `false`: overrides the offset angle directly.
+- `aa.add_yaw_offset(deg)`: Convenience helper that adds `deg` to the current menu slider offset (`get_slider_yaw_offset() + deg`).
+- `aa.get_slider_yaw_offset() -> number`: Returns the menu's active Yaw offset slider value (e.g. `180` for backwards AA). Aliases: `aa.get_menu_yaw_offset()`, `aa.get_base_yaw_offset()`, `aa.get_yaw_slider()`.
+- `aa.is_manual() -> boolean`: Returns whether manual anti-aim is currently active (`"Left"`, `"Right"`, or `"Back"`).
+- `aa.get_manual() -> string?`: Returns active manual direction (`"Left"`, `"Right"`, `"Back"`, or `nil`).
+- `aa.set_manual(dir)`: Sets active manual direction (`"Left"`, `"Right"`, `"Back"`, or `nil` to clear).
 - `aa.override_yaw_modifier(modifier, [offset])`: Custom jitter, spin, or mathematical sway:
   - **Function**: `function(tick, baseYaw) -> number (offset in degrees)`
   - **Presets**: `"Spin"`, `"Random"`, `"Center"`, `"3-Way"`, `"5-Way"`, `"Disabled"`.
@@ -345,13 +367,17 @@ plist.reset_all()
 - `"Override yaw offset"` (`number`): Sets an angle offset relative to enemy visual angle (e.g. `58`, `-58`, `0`, `86`, `-86`).
 - `"Override prefer body aim"` / `"Force body aim"` (`string` | `boolean`): `"Force"` / `true` forces BAim; `"-"` / `false` restores normal scan.
 - `"Override safe point"` / `"Force safe point"` (`string` | `boolean`): `"Force"` / `true` requires safe points.
-- `"Force pitch"` (`boolean`) / `"Force pitch value"` (`number`): Overrides enemy pitch.
+- `"Force pitch"` (`boolean` | `number`): Enables manual pitch override or directly sets pitch angle.
+- `"Force pitch value"` / `"Override pitch"` (`number` | `string`): Overrides enemy pitch. Supports numbers (degrees or radians) and presets (`"Down"`, `"Up"`, `"Zero"`). Fully applies to authoritative hitboxes, backtrack calculations, target scanning, and visual model rendering.
 
 #### Quick Helper Functions:
-- `rage.override_player_yaw(target, deg)`: Forces absolute yaw on target.
-- `rage.override_player_yaw_offset(target, offsetDeg)`: Offsets target yaw (e.g. `58` or `-58`).
-- `rage.override_player_pitch(target, deg)`: Overrides target pitch.
-- `rage.reset_player(target)`: Restores target angles to default.
+- `rage.override_player_yaw(target, deg)` / `rage.set_player_yaw(target, deg)`: Forces absolute yaw on target.
+- `rage.override_player_yaw_offset(target, offsetDeg)` / `rage.set_player_yaw_offset(target, offsetDeg)`: Offsets target yaw (e.g. `58` or `-58`).
+- `rage.override_player_pitch(target, deg)` / `rage.set_player_pitch(target, deg)`: Overrides target pitch.
+- `rage.get_player_pitch(target) -> number?`: Returns active forced pitch override for target, or `nil` if not overridden.
+- `rage.is_player_pitch_overridden(target) -> boolean`: Checks if target has a forced pitch active.
+- `rage.reset_player_pitch(target)`: Restores target pitch to normal.
+- `rage.reset_player(target)` / `rage.reset_resolver(target)`: Restores target angles (both yaw and pitch) to default.
 
 ---
 
@@ -440,6 +466,26 @@ end
 - `entity.is_player_scoped(target) -> boolean`
 - `entity.get_player_lby_deg(target) -> number`
 - `entity.get_player_twist_deg(target) -> number`
+
+### Direct Property Queries (`entity.get_prop`)
+For low-level Gamesense / Neverlose script compatibility, `entity.get_prop` queries raw or resolved animstate/entity fields:
+
+```lua
+local val = entity.get_prop(target, propertyName, [arrayIndex])
+```
+
+#### Supported Properties:
+- `"eye_angles_y"`, `"m_flEyeAngles[1]"`: Enemy visual eye yaw in degrees.
+- `"eye_angles_x"`, `"m_flEyeAngles[0]"`: Enemy visual eye pitch in degrees.
+- `"resolved_yaw"`, `"m_angEyeAngles_resolved[1]"`: Authoritative resolved feet/eye yaw in degrees.
+- `"resolved_pitch"`, `"m_angEyeAngles_resolved[0]"`: Authoritative resolved pitch in degrees (accounts for `force pitch` / resolver overrides).
+- `"torso_yaw"`, `"m_flTorsoYaw"`: Procedural torso yaw.
+- `"goal_feet_yaw"`, `"lby"`, `"m_flLowerBodyYawTarget"`: Lower body yaw in degrees.
+- `"duck_amount"`, `"m_flDuckAmount"`: `1.0` if crouching/ducking, `0.0` otherwise.
+- `"m_vecOrigin"`, `"origin"`: Returns `x, y, z` world coordinates.
+- `"m_vecVelocity"`, `"velocity"`: Returns `vx, vy, vz` velocity vector.
+- `"m_iHealth"`, `"health"`: Player health `[0..100]`.
+- `"m_ArmorValue"`, `"armor"`: Player armor `[0..100]`.
 
 ### Local Weapon & Camera (`client`)
 ```lua
@@ -1552,4 +1598,184 @@ chat.on_message(function(sender, text, isTeam, channel)
         chat.say(`Current server ping: {math.floor(globals.realtime() % 100)}ms`)
     end
 end)
+```
+
+## 20. Clantag & Identity System (`clantag`, `client.set_clantag`)
+
+Penablox Recode features a fully networked, server-authoritative **Clantag System (FE)** that dynamically broadcasts player tags to all connected clients. Clantags appear across the entire game UI—including the dynamic killfeed, spectator bar, scoreboard, and chat—while strictly keeping **Name ESP** clean (displaying only genuine player names).
+
+### 20.1 Architecture & Security Rules
+
+1. **Server-Side Profanity & Text Filtering**:
+   - Every clantag packet (`OP_CL_SET_CLANTAG`) sent to the server is processed through `filterServerText()` backed by Roblox `TextService:FilterStringAsync(..., sender.UserId):GetNonChatStringForBroadcastAsync()`.
+   - Repeated animation frames are cached in `serverTextFilterCache` to guarantee zero latency and 0 redundant HTTP calls to TextService.
+   - Any inappropriate tags are automatically sanitized before attribute assignment (`Player:SetAttribute("Clantag", cleanTag)`).
+2. **Server-Side Rate Limiting**:
+   - Updates are capped at 12 packets/sec per player to prevent network spam while allowing silky smooth 300ms marquee animations.
+3. **Automatic Lifecycle Cleanup**:
+   - When a Lua script unloads, `LuaEngine` detects `HasCustomClantag` and automatically calls `ClantagEngine.Reset()`, restoring the player's tag to empty.
+4. **Zero Impact on Name ESP**:
+   - ESP (`EspEngine`) explicitly resolves raw `DisplayName` or `Name`, ensuring ESP boxes and out-of-screen arrows remain uncluttered.
+
+---
+
+### 20.2 API Methods & Globals
+
+The following functions are available under the `clantag` namespace, `client` namespace, and as top-level globals:
+
+#### 1. `clantag.set(tag: string, anim_type?: string, speed?: number)`
+Aliases: `client.set_clantag(...)`, `set_clantag(...)`
+
+Activates a clantag on the local player.
+
+- **`tag`** (`string`): The base tag string (maximum 32 characters).
+- **`anim_type`** (`string?`): The animation mode (case-insensitive):
+  - `"static"` or `nil`: Static non-animated tag.
+  - `"marquee"`, `"scroll"`, `"running"`: Smooth left-to-right running line / ticker.
+  - `"typewriter"`, `"build"`: Progressively types characters out and deletes them back.
+  - `"custom"`: Uses a predefined frame sequence (see `set_frames`).
+- **`speed`** (`number?`): Step interval in seconds (clamped to `[0.05, 5.0]`, defaults to `0.35`).
+
+```luau
+-- Static clantag:
+clantag.set("gamesense")
+
+-- Running line (marquee) with 0.3s speed:
+clantag.set("penablox.cc", "marquee", 0.30)
+
+-- Typewriter effect:
+clantag.set("neverlose", "typewriter", 0.25)
+```
+
+#### 2. `clantag.reset()`
+Aliases: `client.reset_clantag()`, `reset_clantag()`
+
+Immediately stops any running clantag animation, clears the active tag on the client and server, and removes it from UI components.
+
+```luau
+clantag.reset()
+```
+
+#### 3. `clantag.get(): string`
+Aliases: `client.get_clantag()`, `get_clantag()`
+
+Returns the current active clantag string on the local client (or `""` if none is set).
+
+```luau
+local current = clantag.get()
+print(`Active clantag: '{current}'`)
+```
+
+#### 4. `clantag.set_frames(frames: { string }, speed?: number)`
+
+Plays a custom frame-by-frame animation from a table of strings.
+
+- **`frames`** (`{ string }`): Sequential list of frames to cycle through.
+- **`speed`** (`number?`): Delay in seconds between frames (defaults to `0.35`).
+
+```luau
+clantag.set_frames({
+    "g",
+    "ga",
+    "gam",
+    "game",
+    "games",
+    "gamese",
+    "gamesen",
+    "gamesens",
+    "gamesense",
+    "gamesens",
+    "gamese",
+    "games",
+    "game",
+    "gam",
+    "ga",
+    "g",
+    "",
+}, 0.2)
+```
+
+#### 5. `clantag.format(playerOrName: any, baseName?: string): string`
+
+Formats a player's name with their active clantag (e.g. `[tag] Name`). If the player has no clantag, returns `baseName` or the player's DisplayName.
+
+```luau
+local target = entity.get_player(1)
+if target then
+    local formatted = clantag.format(target)
+    print(`Player with tag: {formatted}`)
+end
+```
+
+---
+
+### 20.3 UI Integration Overview
+
+| UI Element | Clantag Behavior |
+| :--- | :--- |
+| **Killfeed** | Formatted dynamically on killer, assist, and victim. Actively updates in real-time if a tag changes while the card is displayed. |
+| **Spectator HUD** | Formatted in uppercase (`[TAG] USERNAME`) in the bottom target bar while spectating other players. |
+| **Scoreboard** | Displays next to player names on the Tab scoreboard rows and in the spectator list. |
+| **In-Game Chat** | Prepended before role badges and player names with subtle light gray styling (`[tag]`). |
+| **Name ESP** | **Explicitly Excluded**. Only clean display names or account names are shown to ensure crystal clear target recognition. |
+
+---
+
+### 20.4 Complete Examples
+
+#### Example 1: Gamesense Marquee Clantag with Menu Toggle
+```luau
+local clantagTab = menu.add_tab("Clantags")
+local mainSec = clantagTab:add_section("Tag Settings")
+
+local tagEnabled = mainSec:add_toggle("Enable Clantag", false)
+local tagText = mainSec:add_textbox("Tag Text", "gamesense")
+local animType = mainSec:add_combobox("Animation", { "Static", "Marquee", "Typewriter" }, "Marquee")
+local animSpeed = mainSec:add_slider("Speed (ms)", 100, 1000, 300)
+
+local function updateTag()
+    if not tagEnabled:get() then
+        clantag.reset()
+        return
+    end
+
+    local text = tagText:get()
+    local mode = string.lower(animType:get())
+    local speedSec = animSpeed:get() / 1000
+
+    clantag.set(text, mode, speedSec)
+end
+
+tagEnabled:on_change(updateTag)
+tagText:on_change(updateTag)
+animType:on_change(updateTag)
+animSpeed:on_change(updateTag)
+```
+
+#### Example 2: Neverlose Custom Frame Animator
+```luau
+-- Custom multi-stage Neverlose brand animation:
+local nlFrames = {
+    "N",
+    "Ne",
+    "Nev",
+    "Neve",
+    "Never",
+    "Neverl",
+    "Neverlo",
+    "Neverlos",
+    "Neverlose",
+    "Neverlose.",
+    "Neverlose.c",
+    "Neverlose.cc",
+    "Neverlose.cc",
+    "Neverlose.c",
+    "Neverlose.",
+    "Neverlose",
+    "|everlose",
+    "|",
+    "",
+}
+
+clantag.set_frames(nlFrames, 0.25)
 ```

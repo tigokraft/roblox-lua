@@ -343,3 +343,75 @@ textarea.inp { min-height: 150px; font: 12px/1.5 var(--font-mono); resize: verti
 th { white-space: nowrap; }
 td .sub { white-space: nowrap; }
 .card-h h2 { white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+
+/* ---------- v3: Testing | Players workspaces ---------- */
+.ico-flask { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 1.8h4M6.6 2v4.2L2.8 12.6c-.5.8.1 1.6 1 1.6h8.4c.9 0 1.5-.8 1-1.6L9.4 6.2V2M4.6 9.6h6.8'/%3E%3C/svg%3E"); }
+.ico-people { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Ccircle cx='6' cy='5.2' r='2.4'/%3E%3Cpath d='M1.6 13.6c.4-2.4 2.2-3.8 4.4-3.8s4 1.4 4.4 3.8M11 3a2.3 2.3 0 0 1 0 4.4M12.4 9.9c1.2.5 1.9 1.8 2.1 3.7'/%3E%3C/svg%3E"); }
+.ws { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; background: var(--side-2); border-radius: var(--r-md); margin: 0 2px 4px; }
+.ws a { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; border-radius: var(--r-sm); color: var(--side-muted);
+  font: 600 13px/1 var(--font-text); transition: background-color var(--m-out) var(--ease), color var(--m-out) var(--ease); }
+.ws a:hover { color: var(--side-ink); transition-duration: var(--m-in); }
+.ws a[aria-selected="true"] { background: var(--accent); color: #fff; }
+.side-nav { padding-top: 6px; }
+
+/* filter bar under the header (Testing scope) */
+.fbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; padding: 10px 32px; background: var(--card); border-bottom: 1px solid var(--line); }
+.fb-g { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fb-l { font: 500 11px/1 var(--font-mono); text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-right: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 10px; border: 1px solid var(--line-2); border-radius: 999px;
+  background: var(--bg); color: var(--ink); font: 500 12.5px/1 var(--font-text); cursor: pointer; transition: border-color var(--m-out) var(--ease); }
+.chip b { font-weight: 400; color: var(--muted); padding: 0 6px; font-size: 14px; }
+.chip:hover { border-color: var(--bad); } .chip:hover b { color: var(--bad); }
+.chip--all { cursor: default; padding-right: 10px; color: var(--muted); } .chip--all:hover { border-color: var(--line-2); }
+.inp.inp--sm { width: auto; min-height: 30px; padding: 2px 8px; font-size: 12.5px; }
+.seg--sm button { min-height: 26px; padding: 0 10px; font-size: 12.5px; }
+.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); white-space: nowrap; }
+.check input { accent-color: var(--accent); }
+
+/* compare: deaths/min with its 95% range */
+.cell-ci { white-space: nowrap; }
+.cell-ci .sub { display: inline; margin-left: 6px; }
+.ci { position: relative; display: inline-block; vertical-align: middle; width: 120px; height: 14px; margin-right: 10px; }
+.ci::before { content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px; background: var(--line); border-radius: 1px; }
+.ci-r { position: absolute; top: 3px; height: 8px; background: color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 2px; }
+.ci-d { position: absolute; top: 0; width: 2px; height: 14px; margin-left: -1px; background: var(--accent); border-radius: 1px; }
+.ci-b { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--muted); }
+table.cmp td { vertical-align: top; }
+table.cmp td.what { min-width: 220px; max-width: 420px; }
+tr.base td { background: var(--accent-soft); }
+.note { font-weight: 500; }
+.applied { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.applied code { font-size: 11px; padding: 2px 6px; background: var(--sunk); border-radius: 3px; color: var(--ink); }
+
+/* builds */
+.big { font: 400 34px/1 var(--font-display); letter-spacing: -0.02em; }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 16px; }
+.metrics b { display: block; font: 400 19px/1.2 var(--font-display); font-variant-numeric: tabular-nums; }
+.metrics span { font-size: 12px; color: var(--muted); }
+.metrics .bad b { color: var(--bad); } .metrics .warn b { color: var(--warn); }
+.card-h h2 { display: flex; align-items: center; gap: 8px; }
+.err-msg code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+td.err-msg { min-width: 260px; }
+.t-bad { color: var(--bad); }
+
+/* players */
+table.roster td { vertical-align: top; }
+.phead { display: flex; flex-wrap: wrap; gap: 16px 24px; justify-content: space-between; align-items: flex-start; padding: 18px 20px; }
+.phead h2 { font-size: 26px; display: flex; align-items: center; gap: 10px; letter-spacing: -0.02em; }
+.phead .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.stack--tight { gap: 8px; justify-items: end; }
+.days { display: flex; align-items: flex-end; gap: 4px; height: 150px; }
+.days .d { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; }
+.days .d i { display: block; width: 100%; max-width: 30px; min-height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; transition: height .6s var(--ease); }
+.days .d span, .days .d em { font: 10.5px/1 var(--font-mono); color: var(--muted); font-style: normal; white-space: nowrap; }
+.days .d:hover i { background: color-mix(in srgb, var(--accent) 75%, var(--ink)); }
+.dlg--wide { width: min(760px, calc(100vw - 32px)); }
+.dlg-b--scroll { max-height: 60vh; overflow: auto; padding: 0; }
+@media (max-width: 860px) {
+  .fbar { padding: 10px 16px; gap: 10px 16px; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stack--tight { justify-items: start; }
+}
+.card-h .search { width: auto; flex: 0 1 340px; }
+.card-h .seg { flex: 1 1 auto; }

@@ -7,7 +7,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <title>unsyk admin</title>
-<meta name="description" content="Admin console for unsyk: configs, official presets, licenses and live play data.">
+<meta name="description" content="Admin console for unsyk: testing (A/B results, build health, sessions) and players (who is online, stats, licenses, configs).">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='3' width='10' height='10' rx='1.5' transform='rotate(45 8 8)' fill='%231f2de6'/%3E%3Crect x='6.5' y='6.5' width='3' height='3' transform='rotate(45 8 8)' fill='%23eef0f3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -37,22 +37,14 @@
 <div class="app" id="app" hidden>
   <aside class="side" id="side">
     <div class="side-top">
-      <a class="brand" href="#overrides"><span class="mark" aria-hidden="true"><i></i></span><span>unsyk</span><em>admin</em></a>
+      <a class="brand" href="#t/compare"><span class="mark" aria-hidden="true"><i></i></span><span>unsyk</span><em>admin</em></a>
       <button class="icon-btn side-close" id="side-close" aria-label="Close menu">&times;</button>
     </div>
-    <nav class="side-nav" aria-label="Sections">
-      <p class="side-h">Configs</p>
-      <a href="#overrides" data-page="overrides"><span class="ico ico-sliders"></span>Live overrides</a>
-      <a href="#presets" data-page="presets"><span class="ico ico-star"></span>Official presets</a>
-      <a href="#library" data-page="library"><span class="ico ico-stack"></span>Player configs</a>
-      <p class="side-h">People</p>
-      <a href="#licenses" data-page="licenses"><span class="ico ico-key"></span>Licenses</a>
-      <p class="side-h">Play data</p>
-      <a href="#live" data-page="live"><span class="ico ico-pulse"></span>Live</a>
-      <a href="#stats" data-page="stats"><span class="ico ico-bars"></span>Stats and export</a>
-      <p class="side-h">System</p>
-      <a href="#script" data-page="script"><span class="ico ico-code"></span>Script and downloads</a>
-    </nav>
+    <div class="ws" role="tablist" aria-label="Workspace">
+      <a href="#t/compare" role="tab" data-ws="t" id="ws-t"><span class="ico ico-flask"></span>Testing</a>
+      <a href="#p/players" role="tab" data-ws="p" id="ws-p"><span class="ico ico-people"></span>Players</a>
+    </div>
+    <nav class="side-nav" id="side-nav" aria-label="Sections"></nav>
     <div class="side-foot">
       <div class="who"><span class="dot" id="feed-dot"></span><span id="who">admin</span></div>
       <div class="side-actions">
@@ -66,9 +58,10 @@
   <main class="main" id="main" tabindex="-1">
     <header class="top">
       <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open menu" aria-expanded="false"><span></span></button>
-      <div class="top-title"><h1 id="page-title">Live overrides</h1><p id="page-sub" class="muted"></p></div>
+      <div class="top-title"><h1 id="page-title">unsyk admin</h1><p id="page-sub" class="muted"></p></div>
       <div class="top-tools" id="top-tools"></div>
     </header>
+    <div class="fbar" id="fbar" hidden></div>
     <div class="page" id="page"></div>
   </main>
 </div>

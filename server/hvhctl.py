@@ -21,6 +21,12 @@
   hvhctl license add_days NAME --days N      add N days to the current expiry
   hvhctl license kick NAME                   end the live session now (the script stops in game)
   hvhctl license delete NAME
+  hvhctl release                             builds per channel (stable / beta), beta members, history
+  hvhctl release publish FILE --channel stable|beta [--note N] [--git G]   new build (scripts/deploy.sh does this)
+  hvhctl release promote                     beta build becomes stable (the exact bytes the testers ran)
+  hvhctl release rollback stable|beta BUILD  point a channel at an older build
+  hvhctl release end-beta                    beta members get stable again
+  hvhctl beta [add|remove NAME]              beta members (license names, "owner" = the master token)
   hvhctl admin setup                         set the admin panel user, password and authenticator (TOTP)
 """
 import argparse
@@ -39,6 +45,10 @@ try:
     import hvh_auth
 except ImportError:
     hvh_auth = None
+try:
+    import hvh_release
+except ImportError:
+    hvh_release = None
 
 DB_PATH = os.environ.get("INGEST_DB", "/var/lib/hvh-ingest/events.db")
 CONFIG_PATH = os.environ.get("INGEST_CONFIG", os.path.join(os.path.dirname(DB_PATH), "config.json"))
@@ -62,8 +72,22 @@ KEYS = {
     "dodge": ["Off", "On threat", "Always"], "dodge_rate": (20, 250), "dodge_min": (10, 84), "dodge_max": (20, 84),
     "dodge_asym": "b", "dodge_yaw": (0, 45), "dodge_pitch": "b", "dodge_swing": (0, 2000), "dodge_shift": (0, 14),
     "dodge_range": (20, 500), "dodge_hit": "b",
+    "flick": "b", "flick_rate": (2, 64), "flick_ticks": (1, 8), "flick_ang": (0, 180),
+    "flick_side": ["Strafe fix", "Inverter", "Alternate"], "flick_speed": (0, 60), "flick_choke": "b", "flick_unch": "b",
+    "flick_lag": (0, 14),
     "rs_multi": "b", "rs_pitch": "b", "rs_fd": "b",
     "hc_air": (0, 100), "hc_noscope": (0, 100), "hc_duck": (0, 100), "mindmg": (0, 100), "lethal": "b",
+    "hc_move": (0, 100), "ns": "b", "ns_hc": (0, 100), "ns_md": (0, 100), "ns_half": "b", "ns_baim": "b",
+    "qs": ["Off", "On target", "Snipers only"], "qs_how": ["Auto", "Velocity", "Move", "WalkSpeed"],
+    "qs_keep": (0, 100), "qs_hold": (100, 1000), "qs_rest": (0, 1500),
+    "style": ["Custom", "Static back", "No AA", "Swap"], "style_lim": (0, 84),
+    "style_side": ["Invert key", "Fake left", "Fake right"], "style_swap": (2, 60), "style_jit": (0, 100),
+    "style_lag": "b",
+    "roll": ["Off", "Static", "Follow desync", "Against desync", "Jitter", "Random"], "roll_amt": (-100, 100),
+    "roll_rate": (1, 32), "roll_when": ["Always", "Standing", "On ground", "In air"],
+    "fpitch": ["Off", "Down", "Up", "Zero", "Custom", "Jitter"], "fpitch_val": (-70, 70), "fpitch_off": (-20, 20),
+    "fpitch_rate": (1, 32),
+    "rs_roll": ["Off", "Safe point", "Body aim", "Both"], "rs_lean": (4, 40), "rs_pbrute": "b", "rs_pmiss": (1, 4),
 }
 
 
@@ -134,11 +158,11 @@ def rsw(ev):
     if not r or r.get("off") is None:
         if not r:
             return ""
-        extra = " ".join(f"{k}={r[k]}" for k in ("why", "tracked", "ttype", "tval", "ticks", "des", "side", "st", "err") if r.get(k) is not None)
+        extra = " ".join(f"{k}={r[k]}" for k in ("why", "wd", "rv", "tracked", "ttype", "tval", "ticks", "des", "side", "st", "err") if r.get(k) is not None)
         return f" rs={r.get('m', '-')}:no-read {extra}"
     who = "OURS" if r.get("own") else "builtin"
     return (f" rs={r.get('m')}:{who} off={r.get('off')} {r.get('src')} lead={r.get('lead')}t nxt={r.get('nxt')} "
-            f"{r.get('st')} pat={r.get('pat')}")
+            f"{r.get('st')} pat={r.get('pat')} rv={r.get('rv') or '-'}")
 
 
 def fmt(row):
@@ -155,14 +179,17 @@ def fmt(row):
         kl = likely_killer(ev)
         who = (f"likely {kl.get('name')} ({kl.get('wep')}, {kl.get('dist')}st{', scoped' if kl.get('scoped') else ''}, pat={kl.get('pat')})"
                if kl else "attacker unknown")
+        tp = ev.get("tp")
+        tps = (f" | TELEPORT {tp.get('name')} {tp.get('jump')}st {tp.get('ms')}ms before ({tp.get('wep')}, {tp.get('dist')}st)"
+               if isinstance(tp, dict) else "")
         return (f"{t} {'DEATH' if dead else 'HIT  '} -{ev.get('dmg')} ({ev.get('hp_before')}->{ev.get('hp_after')}) | me {me.get('state')} w/{mywep(ev)} "
                 f"side={me.get('side')} lim={me.get('lim')} phase={me.get('phase')} flip={ev.get('flip_age')}t choke={me.get('choke')} "
-                f"ping={ev.get('ping')} | {who} | {ev.get('settings')}{tag}")
+                f"ping={ev.get('ping')} | {who}{tps} | {ev.get('settings')}{tag}")
     if k == "shot":
         r = ev.get("result")
         if r == "fire":
             return (f"{t} FIRE  [{myw(ev)}] -> {ev.get('target')} {ev.get('hitbox')} pdmg={ev.get('pdmg')} "
-                    f"ryaw={ev.get('ryaw')}{rsw(ev)}{tag}")
+                    f"ryaw={ev.get('ryaw')}{rsw(ev)}{' DTPEEK' if ev.get('dtp') else ''}{tag}")
         if r == "hit":
             return f"{t} MYHIT -> {ev.get('target')} {ev.get('hitbox')} -{ev.get('dmg')} left={ev.get('hp_left')} bt={ev.get('bt')}t{tag}"
         return f"{t} MISS  -> {ev.get('target')} {ev.get('hitbox')} reason={ev.get('reason')} | {ev.get('intel') or ''}{tag}"
@@ -175,6 +202,11 @@ def fmt(row):
         return (f"{t} ESHOT {ev.get('name')} ({ev.get('wep')}{', scoped' if ev.get('scoped') else ''}, {ev.get('dist')}st, los={ev.get('los')}) "
                 f"-> {'HIT ' + str(ev.get('dmg')) if ev.get('hit') else 'missed'} | me {ev.get('mst')} side={ev.get('side')} "
                 f"flip={ev.get('flip')}t lim={ev.get('lim')} phase={ev.get('phase')}{tag}")
+    if k == "etp":
+        pre = f" from {ev.get('pre')}st/s" if ev.get('pre') is not None else ""
+        return (f"{t} ETP   {ev.get('name')} jumped {ev.get('jump')}st ({ev.get('spd')}st/s{pre}, {ev.get('wep')}, {ev.get('dist')}st away"
+                f"{', recharge ' + str(ev.get('rech')) + 'ms' if ev.get('rech') else ''}) -> "
+                f"{'HIT ' + str(ev.get('dmg')) if ev.get('hit') else 'no damage'} | me {ev.get('mst')} side={ev.get('side')} phase={ev.get('phase')}{tag}")
     if k == "server":
         return f"{t} SERVER job={ev.get('job')} place={ev.get('place')}"
     if k == "intel":
@@ -246,6 +278,27 @@ def cmd_follow(a):
         time.sleep(1)
 
 
+def cmd_probe(a):
+    """Latest result of each aim probe part (caps / cam / predict), newest first per part."""
+    con = db()
+    rows = con.execute("SELECT * FROM events WHERE kind = 'diag' AND json_extract(data,'$.what') LIKE 'aim probe%' "
+                       "ORDER BY id DESC LIMIT 60").fetchall()
+    seen = set()
+    for r in rows:
+        ev = load(r)
+        w = ev.get("what")
+        if w in seen:
+            continue
+        seen.add(w)
+        print(f"== {w}  ({hm(r['ts'])}, {r['session']}, {ev.get('lic') or 'owner'}, cv {ev.get('cv')})")
+        for k in sorted(ev):
+            if k in ("kind", "what", "my", "srv", "lic", "user", "uid", "cv", "t", "id", "ts", "session"):
+                continue
+            print(f"  {k}: {json.dumps(ev[k]) if isinstance(ev[k], (dict, list)) else ev[k]}")
+    if not seen:
+        print("no aim probe results yet (caps 10s after load, cam once the mouse is still, predict after 2 alive-min)")
+
+
 def cmd_events(a):
     con = db()
     q, p = "SELECT * FROM events WHERE 1=1", []
@@ -268,6 +321,8 @@ EXPORT_KINDS = {
     "intel": "kind = 'intel'",
     "state": "kind = 'state'",
     "ctrl": "kind = 'ctrl'",
+    "aimwait": "kind = 'aimwait'",       # ragebot target episodes: why it held fire
+    "etp": "kind = 'etp'",               # enemy teleports (double tap shifts) seen by the script
     "uploads": "kind IN ('hit_full', 'shotlog')",   # "Upload logs" button: full local timelines + counters
     "all": "kind != 'test'",
 }
@@ -370,9 +425,83 @@ def bucket(v, edges, labels):
     return labels[-1]
 
 
+HEARTBEAT_BUILD = 11   # first build that echoes the /beat token; earlier builds can't, so their no-beat is expected
+
+
+def cmd_abuse(a):
+    """License-abuse report: per key, distinct Roblox accounts / IPs / sessions seen, and how much of its
+    traffic failed to echo the rolling heartbeat token (a stubbed or replayed /beat, i.e. a tampered copy).
+    Flags are advisory — revoke a key yourself with: hvhctl license revoke NAME"""
+    con = db()
+    since = parse_since(a.since) if a.since else (time.time() - 24 * 3600)
+    # events carry lic (key name), uid (Roblox account), beat_ok (bool) and session
+    rows = con.execute("SELECT ts, session, data FROM events WHERE ts > ? AND kind != 'test'", (since,)).fetchall()
+    dls = con.execute("SELECT acct, uid, ip, ts FROM downloads WHERE ts > ?", (since,)).fetchall()
+    per = {}
+    for r in rows:
+        ev = load(r)
+        lic = ev.get("lic")
+        if not lic:
+            continue
+        d = per.setdefault(lic, {"uids": set(), "sess": set(), "ev": 0, "beat_ev": 0, "nobeat": 0, "last": 0, "build": 0})
+        d["ev"] += 1
+        d["last"] = max(d["last"], r["ts"])
+        if ev.get("uid"):
+            d["uids"].add(ev["uid"])
+        if r["session"]:
+            d["sess"].add(r["session"])
+        if isinstance(ev.get("build"), (int, float)):
+            d["build"] = max(d["build"], int(ev["build"]))
+        if "beat_ok" in ev:
+            d["beat_ev"] += 1
+            if not ev["beat_ok"]:
+                d["nobeat"] += 1
+    dl_per = {}
+    for r in dls:
+        d = dl_per.setdefault(r["acct"], {"uids": set(), "ips": set(), "n": 0})
+        d["n"] += 1
+        if r["uid"]:
+            d["uids"].add(r["uid"])
+        if r["ip"]:
+            d["ips"].add(r["ip"])
+    names = sorted(set(per) | set(dl_per))
+    if not names:
+        print("no license traffic in that window")
+        return
+    print(f"license abuse check (since {hm(since)}), {len(names)} key(s):\n")
+    flagged = []
+    for lic in names:
+        d = per.get(lic, {"uids": set(), "sess": set(), "ev": 0, "beat_ev": 0, "nobeat": 0, "last": 0, "build": 0})
+        dd = dl_per.get(lic, {"uids": set(), "ips": set(), "n": 0})
+        uids = d["uids"] | dd["uids"]
+        flags = []
+        if len(uids) > 1:
+            flags.append(f"SHARED: {len(uids)} Roblox accounts")
+        if len(dd["ips"]) > 2:
+            flags.append(f"{len(dd['ips'])} download IPs")
+        nobeat_pct = (d["nobeat"] / d["beat_ev"]) if d["beat_ev"] else 0
+        # Only meaningful once the client runs a build that echoes the token (>= #11). A client on an older
+        # build can't echo, so its no-beat is 100% and expected; don't flag it as tampered.
+        if d["build"] >= HEARTBEAT_BUILD and d["beat_ev"] >= 20 and nobeat_pct > 0.5:
+            flags.append(f"TAMPERED: {nobeat_pct*100:.0f}% events miss a valid heartbeat (build {d['build']})")
+        tag = "  !! " if flags else "     "
+        last = hm(d["last"]) if d["last"] else "-"
+        beatcol = pct(d["nobeat"], d["beat_ev"]) if d["build"] >= HEARTBEAT_BUILD else "old"
+        print(f"{tag}{lic:<20} accts={len(uids)} ips={len(dd['ips'])} sessions={len(d['sess'])} "
+              f"events={d['ev']} no-beat={beatcol} build=#{d['build'] or '?'} dls={dd['n']} last={last}")
+        if flags:
+            flagged.append(lic)
+            print(f"        -> {', '.join(flags)}")
+    if flagged:
+        print(f"\nflagged: {', '.join(flagged)}")
+        print(f"revoke one with:  hvhctl license revoke <name>   (kicks it off every device at once)")
+    else:
+        print("\nnothing flagged.")
+
+
 def cmd_report(a):
     con = db()
-    q, p = "SELECT * FROM events WHERE kind IN ('hit','shot','state','ctrl','server','eshot')", []
+    q, p = "SELECT * FROM events WHERE kind IN ('hit','shot','state','ctrl','server','eshot','etp','aimwait')", []
     if getattr(a, "lic", None):
         if a.lic == "owner":   # the master token's events carry no license tag
             q += " AND json_extract(data,'$.lic') IS NULL"
@@ -395,8 +524,10 @@ def cmd_report(a):
     print(f"window {time.strftime('%m-%d %H:%M', time.localtime(rows[0]['ts']))} - {hm(rows[-1]['ts'])}")
 
     hits, deaths, fires, myhits, misses, states, ctrls, servers, eshots = [], [], [], [], [], [], [], [], []
+    etps, aws = [], []
     for r in rows:
         ev = load(r)
+        ev.setdefault("session", r["session"])
         if r["kind"] == "hit":
             hits.append(ev)
             if (ev.get("hp_after") or 0) <= 0:
@@ -411,6 +542,10 @@ def cmd_report(a):
             servers.append(ev)
         elif r["kind"] == "eshot":
             eshots.append(ev)
+        elif r["kind"] == "etp":
+            etps.append(ev)
+        elif r["kind"] == "aimwait":
+            aws.append(ev)
 
     one_taps = sum(1 for d in deaths if (d.get("hp_before") or 0) >= 100)
     print(f"\nDAMAGE TAKEN: {len(hits)} hits, {len(deaths)} deaths, one-shot from full hp {one_taps} ({pct(one_taps, len(deaths))})")
@@ -485,6 +620,7 @@ def cmd_report(a):
             if r.get("own"):
                 groups["ours:" + str(r.get("src"))][reason] += 1
                 groups["ours:" + str(r.get("st"))][reason] += 1
+                groups["ours:rv=" + str(r.get("rv") or "-")][reason] += 1
     if groups:
         print("\nRESOLVER (shots joined to their fire; resolver misses are the ones that matter)")
         for k in sorted(groups):
@@ -492,6 +628,100 @@ def cmd_report(a):
             n = sum(c.values())
             print(f"  {k}: {n} shots, hit {c.get('hit', 0)} ({pct(c.get('hit', 0), n)}), resolver misses {c.get('resolver', 0)}"
                   + (f", other {dict((x, y) for x, y in c.items() if x not in ('hit', 'resolver'))}" if set(c) - {'hit', 'resolver'} else ""))
+
+    # aim wait: ragebot target episodes -> fired or not, how long it held fire, and what blocked it.
+    # Most "no shot" episodes are not hesitation (checked 2026-11-21): rage.get_target() keeps a stale snapshot for
+    # ~16 ticks, so (a) the ~16 ticks right after our own fire look like a wait, and (b) a target the ragebot saw in
+    # only 1-2 scans before it left view shows up as a 15-20 tick "wait". Only the rest are real holds.
+    if aws:
+        fire_t = defaultdict(list)
+        for f in fires:
+            if isinstance(f.get("t"), (int, float)):
+                fire_t[f.get("session")].append(f["t"])
+        for v in fire_t.values():
+            v.sort()
+
+        def why_lost(w):
+            t, n = w.get("t"), w.get("ticks") or 0
+            if isinstance(t, (int, float)):
+                t0 = t - n / 64
+                prev = [x for x in fire_t.get(w.get("session"), []) if x <= t0 + 0.02]
+                if prev and t0 - prev[-1] < 0.1:
+                    return "leftover after own shot"
+                if prev and t0 - prev[-1] < 1.25 and str(w.get("wep") or "") in ("SSG 08", "AWP"):
+                    return "bolt cycling"
+            sc = w.get("scans")
+            if 14 <= n <= 20 and (sc is None or sc <= 2):
+                return "glimpse (seen 1-2 scans)" if sc is not None else "glimpse? (old build, no scan count)"
+            return "real hold"
+
+        fired = [w for w in aws if w.get("fired")]
+        lost_all = [w for w in aws if not w.get("fired")]
+        lost_why = Counter(why_lost(w) for w in lost_all)
+        lost = [w for w in lost_all if why_lost(w) == "real hold"]
+        print(f"\nAIM WAIT: {len(aws)} target episodes, fired in {len(fired)} ({pct(len(fired), len(aws))}), "
+              f"no shot {len(lost_all)}, of which real holds {len(lost)}")
+        show("no-shot kind", lost_why)
+        def med(xs):
+            xs = sorted(x for x in xs if isinstance(x, (int, float)))
+            return xs[len(xs) // 2] if xs else None
+        tf = [w.get("ticks") for w in fired]
+        if tf:
+            print(f"  ticks target->fire: median {med(tf)}, >=16t (0.25s) {sum(1 for x in tf if x >= 16)}/{len(tf)}")
+        fhc = [w.get("fhc") for w in fired if w.get("fhc")]
+        if fhc:
+            print(f"  hitchance at fire: min {min(fhc)}, median {med(fhc)}")
+        for name, grp in (("fired", fired), ("real hold", lost)):
+            if not grp:
+                continue
+            hcs = [max(h for h in w.get("hc") or [-1]) for w in grp]
+            sp = [w.get("smin") for w in grp]
+            sc = [w.get("scoped") for w in grp]
+            dm = [max(d for d in w.get("dm") or [-1]) for w in grp]
+            print(f"  {name}: best live hc median {med(hcs)}, min speed median {med(sp)}, scoped% median {med(sc)}, "
+                  f"best dmg median {med(dm)}, ticks median {med([w.get('ticks') for w in grp])}, "
+                  f"rescans median {med([w.get('scans') for w in grp])}")
+        if lost:
+            show("real hold with no-spread mode", Counter("on" if w.get("ns") else "off" for w in lost))
+            show("real hold weapon", Counter(w.get("wep") for w in lost))
+            show("real hold state", Counter(w.get("mst") for w in lost))
+        k = next((w.get("keys") for w in aws if w.get("keys")), None)
+        if k:
+            print(f"  target fields: {k}")
+        for w in lost[-4:]:
+            print(f"  e.g. {w.get('who')} {w.get('wep')} {w.get('ticks')}t scoped {w.get('scoped')}% hc {w.get('hc')} "
+                  f"speed {w.get('sp')} dmg {w.get('dm')}")
+
+    # enemy teleports (double tap shifts) and the deaths that came right after one. Only hits from builds with the
+    # detector count (their enemies carry "tpa" or the hit has "tp").
+    dz = [d for d in deaths if "tp" in d or any("tpa" in (x or {}) for x in d.get("enemies") or [])]
+    if etps or dz:
+        nt = sum(1 for d in dz if isinstance(d.get("tp"), dict))
+        nh = sum(1 for e in etps if e.get("hit"))
+        print(f"\nENEMY TELEPORTS: {len(etps)} seen, {nh} hit me within 0.35s ({pct(nh, len(etps))}); "
+              f"deaths with a teleport <=0.5s before: {nt}/{len(dz)} ({pct(nt, len(dz))})")
+        jumps = sorted(e.get("jump") or 0 for e in etps)
+        if jumps:
+            print(f"  jump size st: median {jumps[len(jumps) // 2]}, max {jumps[-1]}")
+        # v2 builds: every enemy on a hit carries tpx = their biggest burst in the last 0.5s (even below the threshold)
+        bursts = []
+        for d in deaths:
+            en = [x for x in d.get("enemies") or [] if isinstance((x or {}).get("tpx"), dict)]
+            if en:
+                bursts.append(max(x["tpx"].get("ex") or 0 for x in en))
+        if bursts:
+            bursts.sort()
+            big = sum(1 for b in bursts if b >= 2.5)
+            print(f"  burst before death (max over enemies, 0.5s): median {bursts[len(bursts) // 2]}st, "
+                  f"max {bursts[-1]}st, >=2.5st in {big}/{len(bursts)}")
+        dp = [f for f in fires if f.get("dtp")]
+        if dp:
+            print(f"  DT peek shots: {len(dp)}")
+        dtp_ids = {f.get("id") for f in dp}
+        if dtp_ids:
+            hit_ids = {h.get("id") for h in myhits}
+            nhit = sum(1 for i in dtp_ids if i in hit_ids)
+            print(f"  DT peek hit rate: {nhit}/{len(dtp_ids)} ({pct(nhit, len(dtp_ids))})")
 
     # enemy shots: my AA state when they fired, split by whether it hit me. Only shots with line of sight
     # to my head count (los False = a wall in between, likely aimed at someone else; None = unknown).
@@ -686,6 +916,14 @@ def cmd_license(a):
     if not a.name:
         raise SystemExit(f"license {a.action} NAME")
     try:
+        if a.action == "import":
+            # re-add a key someone still has in clear (typed hidden, never echoed or logged)
+            import getpass
+            k = getpass.getpass(f"key for {a.name} (hidden): ")
+            hvh_auth.add_key(path, a.name, a.days, "re-imported", key=k)
+            print(f"{a.name}: key re-added ({'never expires' if not a.days else f'{a.days:.0f} days'}); "
+                  "it binds again to the first Roblox account that logs in with it")
+            return
         if a.action == "add":
             k = hvh_auth.add_key(path, a.name, a.days)
             bar = "=" * 60
@@ -701,9 +939,94 @@ def cmd_license(a):
             print("--- end ---")
             return
         hvh_auth.modify(path, a.name, a.action, a.days)
+        if a.action == "delete" and hvh_release is not None:
+            hvh_release.set_member(hvh_release.releases_dir(DB_PATH), a.name, False)
     except ValueError as e:
         raise SystemExit(str(e))
+    except hvh_auth.StoreError as e:
+        raise SystemExit(f"{e}\nnothing was changed")
     print(f"{a.name}: {a.action} done")
+
+
+def _rel_dir():
+    if hvh_release is None:
+        raise SystemExit("hvh_release.py not found next to hvhctl or in /opt/hvh-ingest")
+    return hvh_release.releases_dir(DB_PATH)
+
+
+def _rec_line(r):
+    if not r:
+        return "-"
+    when = time.strftime("%m-%d %H:%M", time.localtime(r.get("moved") or r["ts"]))
+    git = f" git {r['git']}" if r.get("git") else ""
+    note = f"  {r['note']}" if r.get("note") else ""
+    return f"#{r['build']} {r['ver']} ({when}{git}){note}"
+
+
+def cmd_release(a):
+    d = _rel_dir()
+    try:
+        if a.action == "show":
+            s = hvh_release.summary(d)
+            st, be = s["stable"], s["beta"]
+            print(f"stable  {_rec_line(st)}")
+            same = st and be and st["ver"] == be["ver"]
+            print(f"beta    {'same as stable' if same else _rec_line(be)}")
+            print(f"members {', '.join(s['beta_members']) or '(none)'}")
+            print("history:")
+            for r in s["history"][:15]:
+                tags = [c for c in ("stable", "beta") if s[c] and s[c]["build"] == r["build"]]
+                print(f"  {_rec_line(r)}  [{r['ch']}]{'  <- ' + ' '.join(tags) if tags else ''}")
+            return
+        if a.action == "publish":
+            if not a.args:
+                raise SystemExit("release publish FILE --channel stable|beta")
+            with open(a.args[0], "rb") as f:
+                src = f.read()
+            r = hvh_release.publish(d, src, a.channel, a.note or "", a.git or "")
+            if r.get("unchanged"):
+                print(f"{a.channel}: build #{r['build']} {r['ver']} is already live, nothing changed")
+            else:
+                print(f"{a.channel}: build #{r['build']} {r['ver']} published"
+                      + (f" (same bytes as #{r['same_as']})" if r.get("same_as") else ""))
+            return
+        if a.action == "promote":
+            r = hvh_release.promote(d)
+            print(f"stable is now build #{r['build']} {r['ver']} (everyone gets it on their next loader start)")
+            return
+        if a.action == "end-beta":
+            r = hvh_release.end_beta(d)
+            print(f"beta now = stable build #{r['build']}; beta members get stable on their next loader start")
+            return
+        if a.action == "rollback":
+            if len(a.args) != 2 or a.args[0] not in ("stable", "beta") or not a.args[1].lstrip("#").isdigit():
+                raise SystemExit("release rollback stable|beta BUILD")
+            r = hvh_release.point(d, a.args[0], int(a.args[1].lstrip("#")))
+            print(f"{a.args[0]} now points at build #{r['build']} {r['ver']}")
+            return
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+
+def cmd_beta(a):
+    d = _rel_dir()
+    if a.action == "list":
+        s = hvh_release.summary(d)
+        print(f"beta build: {_rec_line(s['beta'])}")
+        print(f"members: {', '.join(s['beta_members']) or '(none)'}")
+        return
+    if not a.name:
+        raise SystemExit(f"beta {a.action} NAME")
+    if a.action == "add" and a.name != "owner" and hvh_auth is not None:
+        names = {k["name"] for k in hvh_auth.list_keys(hvh_auth.keys_path(DB_PATH))}
+        if a.name not in names:
+            raise SystemExit(f"no license named {a.name} (hvhctl license lists them; 'owner' = the master token)")
+    try:
+        m = hvh_release.set_member(d, a.name, a.action == "add")
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"{a.name}: {'in' if a.action == 'add' else 'out of'} beta (members: {', '.join(m) or 'none'}). "
+          "Their script prints [UPDATE] within a minute; it switches on their next loader start.")
 
 
 def cmd_admin(a):
@@ -753,6 +1076,8 @@ def main():
     p = sp.add_parser("report"); p.add_argument("--session", default="latest"); p.add_argument("--since")
     p.add_argument("--lic"); p.set_defaults(fn=cmd_report)
     p = sp.add_parser("friends"); p.set_defaults(fn=cmd_friends)
+    p = sp.add_parser("abuse"); p.add_argument("--since", help="e.g. 24h, 7d (default 24h)"); p.set_defaults(fn=cmd_abuse)
+    p = sp.add_parser("probe"); p.set_defaults(fn=cmd_probe)
     p = sp.add_parser("config"); p.add_argument("action", nargs="?", default="show", choices=["show", "set", "unset", "clear"])
     p.add_argument("items", nargs="*"); p.add_argument("--note")
     p.add_argument("--acct", help="one account (license name or owner) instead of everyone"); p.set_defaults(fn=cmd_config)
@@ -762,8 +1087,14 @@ def main():
     p.add_argument("--since"); p.add_argument("--session"); p.set_defaults(fn=cmd_export)
     p = sp.add_parser("cloud"); p.set_defaults(fn=cmd_cloud)
     p = sp.add_parser("license"); p.add_argument("action", nargs="?", default="list",
-                                                 choices=["list", "add", "revoke", "enable", "reset", "extend", "add_days", "kick", "delete"])
+                                                 choices=["list", "add", "import", "revoke", "enable", "reset", "extend", "add_days", "kick", "delete"])
     p.add_argument("name", nargs="?"); p.add_argument("--days", type=float, default=0); p.set_defaults(fn=cmd_license)
+    p = sp.add_parser("release"); p.add_argument("action", nargs="?", default="show",
+                                                 choices=["show", "publish", "promote", "rollback", "end-beta"])
+    p.add_argument("args", nargs="*"); p.add_argument("--channel", default="stable", choices=["stable", "beta"])
+    p.add_argument("--note"); p.add_argument("--git"); p.set_defaults(fn=cmd_release)
+    p = sp.add_parser("beta"); p.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])
+    p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_beta)
     p = sp.add_parser("admin"); p.add_argument("action", nargs="?", default="show", choices=["show", "setup"])
     p.set_defaults(fn=cmd_admin)
     a = ap.parse_args()
