@@ -42,6 +42,44 @@ A Luau script for the **penablox** cheat (Roblox CS:GO clone), built for **HvH**
 - Per-tick timelines around each hit, CSV export
 - Optional live feed to your own ingest server, reports and A/B testing through `hvhctl`
 
+### Admin dashboard
+A web panel served only on the home LAN / tailnet (never the public internet), behind its own login: user + scrypt password + TOTP, rate limited, idle timeout.
+
+- **Testing workspace**
+  - Compare: deaths per minute with a 95% range and a verdict against a baseline, by config version or build
+  - Builds: stable and beta health, error groups, promote or end beta, testers, build history
+  - Sessions: per-session stats, plus a live view
+  - Live overrides: push config changes to running clients
+- **Players workspace**
+  - Roster: who is online, license state, current game, range stats
+  - Player profile: activity, weapons, likely killers, sessions, cloud configs, downloads, errors
+  - Player configs and official presets: publish a player's config as official, compare, delete
+  - Served copies log, used to trace leaks
+
+### Licensing
+- License keys (`DAA-XXXXX-...`): only the hash is stored, and the first login locks a key to one Roblox account
+- One device per key: every login ends the previous session
+- Expiry dates: extend, set, revoke, enable, reset or delete from the panel or `hvhctl license`
+- Signed 12 h sessions, with the script checking in (`/beat`) and stopping itself if the key is refused, expired or on the wrong account
+- Guest access: keyless, stable build only, no cloud config saves
+- Every served script copy is stamped with the downloader's key and logged
+- `hvhctl abuse` flags shared keys, many download IPs and tampered clients
+
+### Beta channel and releases
+- Every deploy is a numbered build kept on the server, with history and rollback
+- `stable` and `beta` channels: put risky changes on a beta group first, then promote
+- Beta members are chosen per license; players switch channel on their next loader start
+- Build, channel and a beta tag are shown in game and in every event
+- Commands: `scripts/deploy.sh --beta --note "..."`, `scripts/hvh release [publish|promote|rollback|end-beta]`, `scripts/hvh beta [add|remove NAME]`
+
+### Server and tooling
+- Ingest receiver with token and session auth, rate and size limits, SQLite storage
+- Remote control: change allowlisted settings live and A/B test them (`hvhctl config set k=v`)
+- Reports, live tail and CSV export through `hvhctl` and `scripts/hvh`
+- Script obfuscation (Prometheus, local rename only) with a `--raw` fallback
+- Resolver tables served server-side per build (`server/hvh_resolver.py`)
+- Hardened systemd unit, nftables firewall, nightly backups
+
 ## Usage
 
 Load the loader in the cheat:
